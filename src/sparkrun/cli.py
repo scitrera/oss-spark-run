@@ -9,6 +9,8 @@ import click
 
 from sparkrun import __version__
 
+logger = logging.getLogger(__name__)
+
 
 def _get_config_and_registry(config_path=None):
     """Create SparkrunConfig and RegistryManager."""
@@ -117,7 +119,8 @@ def main(ctx, verbose):
 @click.option("--gpu-mem", type=float, default=None, help="Override GPU memory utilization")
 @click.option("--image", default=None, help="Override container image")
 @click.option("--cache-dir", default=None, help="HuggingFace cache directory")
-@click.option("--ray-port", type=int, default=46379, help="Ray GCS port")
+@click.option("--ray-port", type=int, default=46379, help="Ray GCS port (vLLM)")
+@click.option("--init-port", type=int, default=25000, help="SGLang distributed init port")
 @click.option("--dashboard", is_flag=True, help="Enable Ray dashboard on head node")
 @click.option("--dashboard-port", type=int, default=8265, help="Ray dashboard port")
 @click.option("--setup", is_flag=True, help="Pull image and download model before running")
@@ -128,7 +131,7 @@ def main(ctx, verbose):
 @click.argument("extra_args", nargs=-1, type=click.UNPROCESSED)
 @click.pass_context
 def run(ctx, recipe_name, hosts, hosts_file, cluster_name, solo, cluster_id, port, tensor_parallel,
-        gpu_mem, image, cache_dir, ray_port, dashboard, dashboard_port, setup,
+        gpu_mem, image, cache_dir, ray_port, init_port, dashboard, dashboard_port, setup,
         dry_run, foreground, skip_ib, config_path, extra_args):
     """Run an inference recipe.
 
@@ -149,6 +152,8 @@ def run(ctx, recipe_name, hosts, hosts_file, cluster_name, solo, cluster_id, por
     from sparkrun.config import SparkrunConfig
 
     v = init_sparkrun()
+    # SAF's init_framework_desktop reconfigures the root logger — re-apply ours
+    _setup_logging(ctx.obj["verbose"])
     config = SparkrunConfig(config_path) if config_path else SparkrunConfig()
 
     # Find and load recipe
@@ -220,6 +225,32 @@ def run(ctx, recipe_name, hosts, hosts_file, cluster_name, solo, cluster_id, por
         else:
             host_source = "localhost"
 
+    # Validate tensor_parallel vs host count
+    # On DGX Spark each host has 1 GPU, so tensor_parallel maps to node count.
+    if len(host_list) > 1 and not solo:
+        config_chain = recipe.build_config_chain(overrides)
+        tp_val = config_chain.get("tensor_parallel")
+        if tp_val is not None:
+            effective_tp = int(tp_val)
+            if effective_tp > len(host_list):
+                click.echo(
+                    "Error: tensor_parallel=%d requires %d hosts, but only %d provided"
+                    % (effective_tp, effective_tp, len(host_list)),
+                    err=True,
+                )
+                sys.exit(1)
+            elif effective_tp < len(host_list):
+                trimmed = host_list[:effective_tp]
+                logger.info(
+                    "tensor_parallel=%d < %d hosts; using first %d: %s",
+                    effective_tp, len(host_list), effective_tp, ", ".join(trimmed),
+                )
+                click.echo(
+                    "Note: tensor_parallel=%d, using %d of %d hosts"
+                    % (effective_tp, effective_tp, len(host_list))
+                )
+                host_list = trimmed
+
     # Determine mode
     is_solo = solo or len(host_list) <= 1
     if recipe.mode == "cluster" and is_solo and not solo:
@@ -227,46 +258,33 @@ def run(ctx, recipe_name, hosts, hosts_file, cluster_name, solo, cluster_id, por
     if recipe.mode == "solo":
         is_solo = True
 
-    # Handle delegating runtimes (eugr-vllm)
-    if runtime.is_delegating_runtime():
-        from sparkrun.runtimes.eugr_vllm import EugrVllmRuntime
-        if isinstance(runtime, EugrVllmRuntime):
-            rc = runtime.run_delegated(
-                recipe=recipe,
-                overrides=overrides,
-                hosts=host_list if not is_solo else None,
-                solo=is_solo,
-                setup=setup,
-                dry_run=dry_run,
-                cache_dir=config.cache_dir,
-            )
-            sys.exit(rc)
-
     # Resolve container image
     container_image = runtime.resolve_container(recipe, overrides)
 
-    # Setup phase (pull image + download model)
-    if setup:
+    # Setup phase (pull image + download model) — skip for delegating runtimes
+    if setup and not runtime.is_delegating_runtime():
         _run_setup(container_image, recipe.model, host_list, cache_dir, config, dry_run)
 
-    # Generate serve command
+    # Generate serve command for display
     serve_command = runtime.generate_command(
         recipe=recipe,
         overrides=overrides,
         is_cluster=not is_solo,
         num_nodes=len(host_list),
-        head_ip=None,  # will be determined during cluster launch
+        head_ip=None,  # determined during launch
     )
 
+    # Display summary
     click.echo(f"Runtime:   {runtime.runtime_name}")
     click.echo(f"Image:     {container_image}")
     click.echo(f"Model:     {recipe.model}")
-    click.echo(f"Mode:      {'solo' if is_solo else f'cluster ({len(host_list)} nodes)'}")
+    if is_solo:
+        click.echo("Mode:      solo")
+    else:
+        click.echo(f"Mode:      cluster ({len(host_list)} nodes)")
 
-    # Show VRAM estimate inline
     _display_vram_estimate(recipe, cli_overrides=overrides, auto_detect=True)
 
-    # Show cluster/host info
     click.echo()
     click.echo(f"Hosts:     {host_source}")
     if is_solo:
@@ -277,50 +295,32 @@ def run(ctx, recipe_name, hosts, hosts_file, cluster_name, solo, cluster_id, por
         if len(host_list) > 1:
             click.echo(f"  Workers: {', '.join(host_list[1:])}")
 
-    # Show full serve command
     click.echo()
     click.echo("Serve command:")
     for line in serve_command.strip().splitlines():
         click.echo(f"  {line}")
     click.echo()
 
-    # Launch
-    if is_solo:
-        from sparkrun.orchestration.solo import run_solo
-        target_host = host_list[0] if host_list else "localhost"
-        rc = run_solo(
-            host=target_host,
-            image=container_image,
-            serve_command=serve_command,
-            cluster_id=cluster_id,
-            env=recipe.env,
-            cache_dir=cache_dir or str(config.hf_cache_dir),
-            config=config,
-            dry_run=dry_run,
-            detached=not foreground,
-            skip_ib_detect=skip_ib,
-        )
-    else:
-        from sparkrun.orchestration.cluster import run_cluster
-        runtime_env = runtime.get_cluster_env(
-            head_ip="<pending>", num_nodes=len(host_list)
-        )
-        rc = run_cluster(
-            hosts=host_list,
-            image=container_image,
-            serve_command=serve_command,
-            cluster_id=cluster_id,
-            ray_port=ray_port,
-            dashboard_port=dashboard_port,
-            dashboard=dashboard,
-            env=recipe.env,
-            runtime_cluster_env=runtime_env,
-            cache_dir=cache_dir or str(config.hf_cache_dir),
-            config=config,
-            dry_run=dry_run,
-            detached=not foreground,
-            skip_ib_detect=skip_ib,
-        )
+    # Launch — the runtime controls solo vs cluster orchestration
+    rc = runtime.run(
+        hosts=host_list,
+        image=container_image,
+        serve_command=serve_command,
+        recipe=recipe,
+        overrides=overrides,
+        cluster_id=cluster_id,
+        env=recipe.env,
+        cache_dir=cache_dir or str(config.hf_cache_dir),
+        config=config,
+        dry_run=dry_run,
+        detached=not foreground,
+        skip_ib_detect=skip_ib,
+        setup=setup,
+        ray_port=ray_port,
+        dashboard_port=dashboard_port,
+        dashboard=dashboard,
+        init_port=init_port,
+    )
 
     sys.exit(rc)
 
@@ -577,16 +577,30 @@ def stop(ctx, hosts, hosts_file, cluster_name, cluster_id, dry_run, config_path)
         click.echo("Error: No hosts specified. Use --hosts or configure defaults.", err=True)
         sys.exit(1)
 
-    if len(host_list) == 1:
-        from sparkrun.orchestration.solo import stop_solo
-        rc = stop_solo(host_list[0], cluster_id, config, dry_run)
-    else:
-        from sparkrun.orchestration.cluster import stop_cluster
-        rc = stop_cluster(host_list, cluster_id, config, dry_run)
+    from sparkrun.orchestration.primitives import build_ssh_kwargs, cleanup_containers, cleanup_containers_local
+    from sparkrun.orchestration.docker import generate_container_name
 
-    if rc == 0:
-        click.echo("Workload stopped.")
-    sys.exit(rc)
+    ssh_kwargs = build_ssh_kwargs(config)
+
+    # Build list of all possible container names for this cluster_id
+    # (covers solo, Ray head/worker, and native node_N patterns)
+    container_names = [
+        generate_container_name(cluster_id, "solo"),
+        generate_container_name(cluster_id, "head"),
+        generate_container_name(cluster_id, "worker"),
+    ]
+    # Add per-rank node containers for native clustering
+    for rank in range(len(host_list)):
+        container_names.append("%s_node_%d" % (cluster_id, rank))
+
+    is_local = len(host_list) == 1 and host_list[0] in ("localhost", "127.0.0.1", "")
+    if is_local:
+        cleanup_containers_local(container_names, dry_run=dry_run)
+    else:
+        cleanup_containers(host_list, container_names, ssh_kwargs=ssh_kwargs, dry_run=dry_run)
+
+    click.echo("Workload stopped on %d host(s)." % len(host_list))
+    sys.exit(0)
 
 
 @main.group()

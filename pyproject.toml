@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sparkrun"
-version = "0.1.0"
+version = "0.0.1"
 description = "Launch and manage Docker-based inference workloads on NVIDIA DGX Spark systems"
 readme = "README.md"
 license = "BSD-3-Clause"
 requires-python = ">=3.12"
 authors = [
-    { name = "Scitrera", email = "open-source-team@scitrera.com" },
+    { name = "scitrera.ai", email = "open-source-team@scitrera.com" },
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",

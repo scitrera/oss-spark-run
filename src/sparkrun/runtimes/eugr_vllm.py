@@ -150,3 +150,38 @@ class EugrVllmRuntime(RuntimePlugin):
         if not recipe.command:
             issues.append("[eugr-vllm] command template is recommended for eugr recipes")
         return issues
+
+    # --- Launch / Stop ---
+
+    def run(
+        self,
+        hosts: list[str],
+        image: str,
+        serve_command: str,
+        recipe: Recipe,
+        overrides: dict[str, Any],
+        *,
+        cluster_id: str = "sparkrun0",
+        env: dict[str, str] | None = None,
+        cache_dir: str | None = None,
+        config=None,
+        dry_run: bool = False,
+        detached: bool = True,
+        skip_ib_detect: bool = False,
+        setup: bool = False,
+        **kwargs,
+    ) -> int:
+        """Launch via eugr delegation.
+
+        Wraps :meth:`run_delegated` with the standard runtime interface.
+        """
+        is_solo = len(hosts) <= 1
+        return self.run_delegated(
+            recipe=recipe,
+            overrides=overrides,
+            hosts=hosts if not is_solo else None,
+            solo=is_solo,
+            setup=setup,
+            dry_run=dry_run,
+            cache_dir=Path(cache_dir) if cache_dir else None,
+        )

@@ -212,7 +212,7 @@ def test_sglang_generate_command_cluster():
     cmd = runtime.generate_command(
         recipe, {}, is_cluster=True, num_nodes=2, head_ip="192.168.1.100"
     )
-    assert "--dist-init-addr 192.168.1.100:20000" in cmd
+    assert "--dist-init-addr 192.168.1.100:25000" in cmd
     assert "--nnodes 2" in cmd
     assert "--tp-size 4" in cmd
 

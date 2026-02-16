@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from abc import abstractmethod
 from logging import Logger
 from typing import Any, TYPE_CHECKING
@@ -10,7 +11,10 @@ from scitrera_app_framework.api.plugins import Plugin
 from scitrera_app_framework.api.variables import Variables
 
 if TYPE_CHECKING:
+    from sparkrun.config import SparkrunConfig
     from sparkrun.recipe import Recipe
+
+logger = logging.getLogger(__name__)
 
 EXT_RUNTIME = "sparkrun.runtime"
 
@@ -94,6 +98,48 @@ class RuntimePlugin(Plugin):
         """
         return {}
 
+    def cluster_strategy(self) -> str:
+        """Return the clustering strategy for multi-node mode.
+
+        Returns:
+            ``"ray"`` — use Ray cluster orchestration (start Ray head/workers,
+            then exec serve command on head). This is the default.
+
+            ``"native"`` — the runtime handles its own distribution. Each node
+            runs the serve command directly with node-rank arguments appended.
+            Used by sglang, which has built-in multi-node support via
+            ``--dist-init-addr``, ``--nnodes``, ``--node-rank``.
+        """
+        return "ray"
+
+    def generate_node_command(
+        self,
+        recipe: Recipe,
+        overrides: dict[str, Any],
+        head_ip: str,
+        num_nodes: int,
+        node_rank: int,
+        init_port: int = 25000,
+    ) -> str:
+        """Generate the serve command for a specific node in native clustering.
+
+        Only called when :meth:`cluster_strategy` returns ``"native"``.
+
+        Args:
+            recipe: The loaded recipe.
+            overrides: CLI override values.
+            head_ip: Head node IP address.
+            num_nodes: Total number of nodes.
+            node_rank: This node's rank (0 = head).
+            init_port: Coordination port for distributed init.
+
+        Returns:
+            The full command string for this node.
+        """
+        raise NotImplementedError(
+            "%s does not implement native clustering" % type(self).__name__
+        )
+
     def validate_recipe(self, recipe: Recipe) -> list[str]:
         """Return list of warnings/errors for runtime-specific fields.
 
@@ -108,6 +154,222 @@ class RuntimePlugin(Plugin):
         layer and instead call external tools directly.
         """
         return False
+
+    # --- Launch / Stop interface ---
+    #
+    # Runtimes control their own orchestration by overriding run() and stop().
+    # The default implementations handle solo (single-node) mode.  Runtimes
+    # that support multi-node clustering override these to compose their
+    # specific flow from orchestration primitives.
+
+    def run(
+        self,
+        hosts: list[str],
+        image: str,
+        serve_command: str,
+        recipe: Recipe,
+        overrides: dict[str, Any],
+        *,
+        cluster_id: str = "sparkrun0",
+        env: dict[str, str] | None = None,
+        cache_dir: str | None = None,
+        config: SparkrunConfig | None = None,
+        dry_run: bool = False,
+        detached: bool = True,
+        skip_ib_detect: bool = False,
+        **kwargs,
+    ) -> int:
+        """Launch the workload — solo or cluster.
+
+        The default implementation handles solo (single-node) mode:
+        IB detection, container launch, serve command execution.
+
+        Runtimes that support multi-node clustering should override this
+        method and compose their flow from orchestration primitives.
+
+        Args:
+            hosts: List of hostnames/IPs (first = head).
+            image: Container image to use.
+            serve_command: The inference serve command to run.
+            recipe: The loaded recipe.
+            overrides: CLI override values.
+            cluster_id: Identifier for container naming.
+            env: Additional environment variables from the recipe.
+            cache_dir: HuggingFace cache directory path.
+            config: SparkrunConfig instance for SSH settings.
+            dry_run: Show what would be done without executing.
+            detached: Run serve command in background.
+            skip_ib_detect: Skip InfiniBand detection.
+            **kwargs: Runtime-specific keyword arguments.
+
+        Returns:
+            Exit code (0 = success).
+        """
+        return self._run_solo(
+            host=hosts[0] if hosts else "localhost",
+            image=image,
+            serve_command=serve_command,
+            cluster_id=cluster_id,
+            env=env,
+            cache_dir=cache_dir,
+            config=config,
+            dry_run=dry_run,
+            detached=detached,
+            skip_ib_detect=skip_ib_detect,
+        )
+
+    def stop(
+        self,
+        hosts: list[str],
+        cluster_id: str = "sparkrun0",
+        config: SparkrunConfig | None = None,
+        dry_run: bool = False,
+    ) -> int:
+        """Stop a running workload.
+
+        The default implementation handles solo (single-node) teardown.
+        Runtimes that support multi-node should override.
+
+        Args:
+            hosts: List of hostnames/IPs in the workload.
+            cluster_id: Cluster identifier used when launching.
+            config: SparkrunConfig instance for SSH settings.
+            dry_run: Show what would be done without executing.
+
+        Returns:
+            Exit code (0 = success).
+        """
+        return self._stop_solo(
+            host=hosts[0] if hosts else "localhost",
+            cluster_id=cluster_id,
+            config=config,
+            dry_run=dry_run,
+        )
+
+    # --- Default solo implementation (used by base and simple runtimes) ---
+
+    def _run_solo(
+        self,
+        host: str,
+        image: str,
+        serve_command: str,
+        cluster_id: str = "sparkrun0",
+        env: dict[str, str] | None = None,
+        cache_dir: str | None = None,
+        config: SparkrunConfig | None = None,
+        dry_run: bool = False,
+        detached: bool = True,
+        skip_ib_detect: bool = False,
+    ) -> int:
+        """Launch a single-node inference workload.
+
+        Steps:
+        1. Detect InfiniBand on the target host (optional).
+        2. Launch container with ``sleep infinity``.
+        3. Execute the serve command inside the container.
+        """
+        import time
+        from sparkrun.orchestration.primitives import (
+            build_ssh_kwargs,
+            build_volumes,
+            merge_env,
+            detect_infiniband,
+            detect_infiniband_local,
+            run_script_on_host,
+        )
+        from sparkrun.orchestration.docker import generate_container_name
+        from sparkrun.orchestration.scripts import (
+            generate_container_launch_script,
+            generate_exec_serve_script,
+        )
+
+        is_local = host in ("localhost", "127.0.0.1", "")
+        container_name = generate_container_name(cluster_id, "solo")
+        ssh_kwargs = build_ssh_kwargs(config)
+        volumes = build_volumes(cache_dir)
+        all_env = merge_env(env)
+
+        # Step 1: InfiniBand detection
+        t0 = time.monotonic()
+        nccl_env: dict[str, str] = {}
+        if not skip_ib_detect:
+            logger.info("Step 1/3: Detecting InfiniBand on %s...", host)
+            if is_local:
+                nccl_env = detect_infiniband_local(dry_run=dry_run)
+            else:
+                nccl_env = detect_infiniband(
+                    [host], ssh_kwargs=ssh_kwargs, dry_run=dry_run,
+                )
+            logger.info("Step 1/3: IB detection done (%.1fs)", time.monotonic() - t0)
+        else:
+            logger.info("Step 1/3: Skipping InfiniBand detection")
+
+        # Step 2: Launch container
+        t0 = time.monotonic()
+        logger.info(
+            "Step 2/3: Launching container %s on %s (image: %s)...",
+            container_name, host, image,
+        )
+        launch_script = generate_container_launch_script(
+            image=image,
+            container_name=container_name,
+            command="sleep infinity",
+            env=all_env,
+            volumes=volumes,
+            nccl_env=nccl_env,
+        )
+        result = run_script_on_host(
+            host, launch_script, ssh_kwargs=ssh_kwargs, timeout=120, dry_run=dry_run,
+        )
+        if not result.success and not dry_run:
+            logger.error("Failed to launch container: %s", result.stderr)
+            return 1
+        logger.info("Step 2/3: Container launched (%.1fs)", time.monotonic() - t0)
+
+        # Step 3: Execute serve command
+        t0 = time.monotonic()
+        logger.info("Step 3/3: Executing serve command in %s...", container_name)
+        exec_script = generate_exec_serve_script(
+            container_name=container_name,
+            serve_command=serve_command,
+            env=all_env,
+            detached=detached,
+        )
+        result = run_script_on_host(
+            host, exec_script, ssh_kwargs=ssh_kwargs, timeout=60, dry_run=dry_run,
+        )
+        logger.info("Step 3/3: Serve command dispatched (%.1fs)", time.monotonic() - t0)
+
+        if dry_run:
+            return 0
+        return result.returncode
+
+    def _stop_solo(
+        self,
+        host: str,
+        cluster_id: str = "sparkrun0",
+        config: SparkrunConfig | None = None,
+        dry_run: bool = False,
+    ) -> int:
+        """Stop a solo workload by removing the container."""
+        from sparkrun.orchestration.primitives import (
+            build_ssh_kwargs,
+            cleanup_containers,
+            cleanup_containers_local,
+        )
+        from sparkrun.orchestration.docker import generate_container_name
+
+        container_name = generate_container_name(cluster_id, "solo")
+        is_local = host in ("localhost", "127.0.0.1", "")
+
+        if is_local:
+            cleanup_containers_local([container_name], dry_run=dry_run)
+        else:
+            ssh_kwargs = build_ssh_kwargs(config)
+            cleanup_containers([host], [container_name], ssh_kwargs=ssh_kwargs, dry_run=dry_run)
+
+        logger.info("Solo workload '%s' stopped on %s", cluster_id, host)
+        return 0
 
     def __repr__(self) -> str:
         return "%s(runtime_name=%r)" % (self.__class__.__name__, self.runtime_name)

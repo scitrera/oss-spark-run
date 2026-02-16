@@ -12,6 +12,8 @@ import pytest
 from click.testing import CliRunner
 
 from sparkrun.cli import main
+from sparkrun.runtimes.vllm import VllmRuntime
+from sparkrun.runtimes.sglang import SglangRuntime
 
 
 @pytest.fixture
@@ -182,10 +184,8 @@ class TestRunCommand:
 
         Should show runtime info and exit 0.
         """
-        # Mock run_solo to prevent actual SSH execution
-        with mock.patch("sparkrun.orchestration.solo.run_solo") as mock_run_solo:
-            mock_run_solo.return_value = 0
-
+        # Mock runtime.run() to prevent actual SSH execution
+        with mock.patch.object(VllmRuntime, "run", return_value=0) as mock_run:
             result = runner.invoke(main, [
                 "run",
                 "glm-4.7-flash-awq",
@@ -203,9 +203,9 @@ class TestRunCommand:
             assert "Mode:" in result.output
             assert "solo" in result.output.lower()
 
-            # Verify run_solo was called with dry_run=True
-            mock_run_solo.assert_called_once()
-            call_kwargs = mock_run_solo.call_args.kwargs
+            # Verify runtime.run() was called with dry_run=True
+            mock_run.assert_called_once()
+            call_kwargs = mock_run.call_args.kwargs
             assert call_kwargs["dry_run"] is True
 
     def test_run_nonexistent_recipe(self, runner, reset_bootstrap):
@@ -403,3 +403,92 @@ class TestRunWithCluster:
         assert result.exit_code == 0
         assert "--cluster" in result.output
         assert "--hosts-file" in result.output
+
+
+class TestTensorParallelValidation:
+    """Test tensor_parallel vs host count validation."""
+
+    def test_tp_exceeds_hosts_errors(self, runner, reset_bootstrap):
+        """tensor_parallel > number of hosts should exit with error."""
+        # qwen3-coder-sglang-tp2 has defaults.tensor_parallel=2
+        # Provide only 1 host (not --solo) so we hit the validation
+        result = runner.invoke(main, [
+            "run",
+            "qwen3-coder-sglang-tp2",
+            "--dry-run",
+            "--tp", "4",
+            "--hosts", "10.0.0.1,10.0.0.2,10.0.0.3",
+        ])
+
+        assert result.exit_code != 0
+        assert "tensor_parallel=4" in result.output
+        assert "only 3 provided" in result.output
+
+    def test_tp_less_than_hosts_trims(self, runner, reset_bootstrap):
+        """tensor_parallel < number of hosts should trim host list."""
+        with mock.patch.object(SglangRuntime, "run", return_value=0) as mock_run:
+            result = runner.invoke(main, [
+                "run",
+                "qwen3-coder-sglang-tp2",
+                "--dry-run",
+                "--hosts", "10.0.0.1,10.0.0.2,10.0.0.3,10.0.0.4",
+            ])
+
+            assert result.exit_code == 0
+            assert "tensor_parallel=2" in result.output
+            assert "using 2 of 4 hosts" in result.output
+            # Should have called with only 2 hosts
+            mock_run.assert_called_once()
+            call_kwargs = mock_run.call_args.kwargs
+            assert len(call_kwargs["hosts"]) == 2
+            assert call_kwargs["hosts"] == ["10.0.0.1", "10.0.0.2"]
+
+    def test_tp_equals_hosts_uses_all(self, runner, reset_bootstrap):
+        """tensor_parallel == number of hosts should use all hosts."""
+        with mock.patch.object(SglangRuntime, "run", return_value=0) as mock_run:
+            result = runner.invoke(main, [
+                "run",
+                "qwen3-coder-sglang-tp2",
+                "--dry-run",
+                "--hosts", "10.0.0.1,10.0.0.2",
+            ])
+
+            assert result.exit_code == 0
+            # No trimming message
+            assert "using 2 of" not in result.output
+            mock_run.assert_called_once()
+            call_kwargs = mock_run.call_args.kwargs
+            assert len(call_kwargs["hosts"]) == 2
+
+    def test_tp_trims_to_one_becomes_solo(self, runner, reset_bootstrap):
+        """tensor_parallel=1 with multiple hosts should trim to 1 host and run solo."""
+        with mock.patch.object(VllmRuntime, "run", return_value=0) as mock_run:
+            result = runner.invoke(main, [
+                "run",
+                "glm-4.7-flash-awq",
+                "--dry-run",
+                "--hosts", "10.0.0.1,10.0.0.2",
+            ])
+
+            assert result.exit_code == 0
+            # glm recipe has tensor_parallel=1 in defaults, so should trim to 1 host
+            assert "tensor_parallel=1" in result.output
+            assert "using 1 of 2 hosts" in result.output
+            assert "solo" in result.output.lower()
+            mock_run.assert_called_once()
+
+    def test_solo_flag_skips_tp_validation(self, runner, reset_bootstrap):
+        """--solo flag should skip tensor_parallel validation entirely."""
+        with mock.patch.object(SglangRuntime, "run", return_value=0) as mock_run:
+            result = runner.invoke(main, [
+                "run",
+                "qwen3-coder-sglang-tp2",
+                "--solo",
+                "--dry-run",
+                "--hosts", "10.0.0.1",
+            ])
+
+            assert result.exit_code == 0
+            # No trimming or error messages
+            assert "tensor_parallel=" not in result.output
+            mock_run.assert_called_once()
