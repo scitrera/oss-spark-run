@@ -39,6 +39,7 @@ def distribute_model_from_local(
     hosts: list[str],
     cache_dir: str | None = None,
     token: str | None = None,
+    revision: str | None = None,
     ssh_user: str | None = None,
     ssh_key: str | None = None,
     ssh_options: list[str] | None = None,
@@ -58,6 +59,7 @@ def distribute_model_from_local(
         hosts: Target hostnames or IPs (used for identification/reporting).
         cache_dir: Override for the HuggingFace cache directory.
         token: Optional HuggingFace API token for gated models.
+        revision: Optional revision (branch, tag, or commit hash).
         ssh_user: Optional SSH username.
         ssh_key: Optional path to SSH private key.
         ssh_options: Additional SSH options.
@@ -77,7 +79,7 @@ def distribute_model_from_local(
     logger.info("Distributing model '%s' from local to %d host(s)", model_id, len(hosts))
 
     # Step 1: download model locally
-    rc = download_model(model_id, cache_dir=cache, token=token, dry_run=dry_run)
+    rc = download_model(model_id, cache_dir=cache, token=token, revision=revision, dry_run=dry_run)
     if rc != 0:
         logger.error("Failed to download model '%s' locally — aborting distribution", model_id)
         return list(hosts)
@@ -110,6 +112,7 @@ def distribute_model_from_head(
     model_id: str,
     hosts: list[str],
     cache_dir: str | None = None,
+    revision: str | None = None,
     ssh_user: str | None = None,
     ssh_key: str | None = None,
     ssh_options: list[str] | None = None,
@@ -127,6 +130,7 @@ def distribute_model_from_head(
         model_id: HuggingFace model identifier.
         hosts: Cluster hostnames (``hosts[0]`` is the head).
         cache_dir: Override for the HuggingFace cache directory.
+        revision: Optional revision (branch, tag, or commit hash).
         ssh_user: Optional SSH username.
         ssh_key: Optional path to SSH private key.
         ssh_options: Additional SSH options.
@@ -149,13 +153,17 @@ def distribute_model_from_head(
 
     # Step 1: download model on head
     from sparkrun.models.download import is_gguf_model, parse_gguf_model_spec
+    revision_flag = "--revision %s " % revision if revision else ""
     if is_gguf_model(model_id):
         repo_id, quant = parse_gguf_model_spec(model_id)
         dl_script = read_script("model_sync_gguf.sh").format(
             repo_id=repo_id, quant=quant or "", cache=cache,
+            revision_flag=revision_flag,
         )
     else:
-        dl_script = read_script("model_sync.sh").format(model_id=model_id, cache=cache)
+        dl_script = read_script("model_sync.sh").format(
+            model_id=model_id, cache=cache, revision_flag=revision_flag,
+        )
     dl_result = run_remote_script(
         head, dl_script,
         ssh_user=ssh_user, ssh_key=ssh_key, ssh_options=ssh_options,

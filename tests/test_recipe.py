@@ -102,6 +102,32 @@ def test_recipe_from_dict(sample_v2_recipe_data: dict[str, Any]):
     assert recipe.env["CUDA_VISIBLE_DEVICES"] == "0,1"
 
 
+def test_recipe_model_revision():
+    """model_revision is parsed from recipe data."""
+    recipe = Recipe.from_dict({
+        "name": "Test",
+        "model": "org/model",
+        "model_revision": "abc123def",
+    })
+    assert recipe.model_revision == "abc123def"
+
+
+def test_recipe_model_revision_default_none():
+    """model_revision defaults to None when not specified."""
+    recipe = Recipe.from_dict({"name": "Test", "model": "org/model"})
+    assert recipe.model_revision is None
+
+
+def test_recipe_model_revision_not_in_runtime_config():
+    """model_revision should not leak into runtime_config."""
+    recipe = Recipe.from_dict({
+        "name": "Test",
+        "model": "org/model",
+        "model_revision": "v2.1",
+    })
+    assert "model_revision" not in recipe.runtime_config
+
+
 def test_recipe_name_defaults_to_unnamed():
     """Recipe without name and no source_path should default to 'unnamed'."""
     recipe = Recipe.from_dict({"model": "test-model"})

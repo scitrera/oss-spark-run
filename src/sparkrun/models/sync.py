@@ -15,6 +15,7 @@ def sync_model_to_hosts(
     model_id: str,
     hosts: list[str],
     cache_dir: str | None = None,
+    revision: str | None = None,
     ssh_user: str | None = None,
     ssh_key: str | None = None,
     dry_run: bool = False,
@@ -28,6 +29,7 @@ def sync_model_to_hosts(
         model_id: HuggingFace model identifier.
         hosts: List of remote hostnames or IPs.
         cache_dir: Override for the HuggingFace cache directory.
+        revision: Optional revision (branch, tag, or commit hash).
         ssh_user: Optional SSH username.
         ssh_key: Optional path to SSH private key.
         dry_run: If True, show what would be done without executing.
@@ -36,8 +38,11 @@ def sync_model_to_hosts(
         List of hostnames where the sync failed.
     """
     cache = cache_dir or str(DEFAULT_HF_CACHE_DIR)
+    revision_flag = "--revision %s " % revision if revision else ""
 
-    script = read_script("model_sync.sh").format(model_id=model_id, cache=cache)
+    script = read_script("model_sync.sh").format(
+        model_id=model_id, cache=cache, revision_flag=revision_flag,
+    )
 
     results = run_remote_scripts_parallel(
         hosts,

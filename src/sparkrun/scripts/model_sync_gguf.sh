@@ -15,7 +15,7 @@ fi
 
 echo "Downloading GGUF model: {repo_id} (quant: {quant})..."
 if command -v huggingface-cli &>/dev/null; then
-    huggingface-cli download "{repo_id}" --include "*{quant}*" --cache-dir "{cache}/hub"
+    huggingface-cli download "{repo_id}" --include "*{quant}*" {revision_flag}--cache-dir "{cache}/hub"
 else
     echo "ERROR: huggingface-cli not available on this host" >&2
     exit 1

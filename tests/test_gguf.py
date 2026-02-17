@@ -220,7 +220,7 @@ class TestDownloadModelGguf:
                 import sparkrun.models.download as dl_mod
                 orig = dl_mod._download_gguf
 
-                def patched_download(model_id, cache_dir=None, token=None, dry_run=False):
+                def patched_download(model_id, cache_dir=None, token=None, revision=None, dry_run=False):
                     # Just verify it's called with the right model
                     assert model_id == "Qwen/Qwen3-1.7B-GGUF:Q4_K_M"
                     return 0
@@ -241,3 +241,83 @@ class TestDownloadModelGguf:
             # should NOT call _download_gguf
             download_model("meta-llama/Llama-3-8B", cache_dir="/fake", dry_run=True)
             mock_gguf.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Revision-aware cache checking
+# ---------------------------------------------------------------------------
+
+class TestIsModelCachedRevision:
+    """Test revision-aware is_model_cached behaviour."""
+
+    def _create_snapshot(self, cache_dir: Path, model_id: str, commit_hash: str,
+                         files: list[str], ref: str | None = None):
+        """Create a fake HF cache snapshot with optional ref."""
+        safe_name = model_id.replace("/", "--")
+        model_cache = cache_dir / "hub" / f"models--{safe_name}"
+        snapshot = model_cache / "snapshots" / commit_hash
+        snapshot.mkdir(parents=True, exist_ok=True)
+        for f in files:
+            (snapshot / f).write_text("fake")
+        if ref:
+            refs_dir = model_cache / "refs"
+            refs_dir.mkdir(parents=True, exist_ok=True)
+            (refs_dir / ref).write_text(commit_hash)
+
+    def test_no_revision_defaults_to_main_ref(self, tmp_path):
+        """Without revision, checks refs/main first."""
+        self._create_snapshot(
+            tmp_path, "org/model", "abc123",
+            ["model.safetensors"], ref="main",
+        )
+        assert is_model_cached("org/model", str(tmp_path)) is True
+
+    def test_no_revision_config_only_returns_false(self, tmp_path):
+        """refs/main snapshot with only config.json is not cached."""
+        self._create_snapshot(
+            tmp_path, "org/model", "abc123",
+            ["config.json"], ref="main",
+        )
+        assert is_model_cached("org/model", str(tmp_path)) is False
+
+    def test_specific_revision_by_ref(self, tmp_path):
+        """Checks only the snapshot for the requested ref."""
+        # v1 has only config, v2 has weights
+        self._create_snapshot(
+            tmp_path, "org/model", "aaa111",
+            ["config.json"], ref="v1",
+        )
+        self._create_snapshot(
+            tmp_path, "org/model", "bbb222",
+            ["model.safetensors"], ref="v2",
+        )
+        assert is_model_cached("org/model", str(tmp_path), revision="v1") is False
+        assert is_model_cached("org/model", str(tmp_path), revision="v2") is True
+
+    def test_revision_by_commit_hash(self, tmp_path):
+        """Revision can be a direct commit hash (no ref file needed)."""
+        self._create_snapshot(
+            tmp_path, "org/model", "deadbeef",
+            ["model-00001.safetensors"],
+        )
+        assert is_model_cached("org/model", str(tmp_path), revision="deadbeef") is True
+        assert is_model_cached("org/model", str(tmp_path), revision="other") is False
+
+    def test_fallback_to_all_snapshots(self, tmp_path):
+        """Falls back to any snapshot when refs/main does not exist."""
+        self._create_snapshot(
+            tmp_path, "org/model", "abc123",
+            ["model.bin"],
+            # No ref — simulates manually placed cache
+        )
+        assert is_model_cached("org/model", str(tmp_path)) is True
+
+    def test_revision_dry_run_accepted(self):
+        """download_model accepts revision parameter in dry-run mode."""
+        rc = download_model("org/model", cache_dir="/fake", revision="v2.1", dry_run=True)
+        assert rc == 0
+
+    def test_gguf_revision_dry_run_accepted(self):
+        """GGUF download_model accepts revision parameter in dry-run mode."""
+        rc = download_model("Qwen/Qwen3-1.7B-GGUF:Q4_K_M", cache_dir="/fake", revision="v1.0", dry_run=True)
+        assert rc == 0

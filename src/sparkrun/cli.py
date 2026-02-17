@@ -376,6 +376,7 @@ def run(
             container_image, recipe.model, host_list,
             effective_cache_dir,
             config, dry_run, skip_ib,
+            model_revision=recipe.model_revision,
         )
 
     # For GGUF models that were pre-synced, resolve the container-internal
@@ -1522,6 +1523,7 @@ def _distribute_resources(
         config,
         dry_run: bool,
         skip_ib: bool,
+        model_revision: str | None = None,
 ) -> dict[str, str] | None:
     """Detect IB, distribute container image and model to target hosts.
 
@@ -1539,6 +1541,7 @@ def _distribute_resources(
         config: SparkrunConfig instance.
         dry_run: Show what would be done without executing.
         skip_ib: Skip InfiniBand detection.
+        model_revision: Optional HuggingFace model revision to pin.
 
     Returns:
         Pre-detected NCCL environment dict, or ``None`` if IB detection
@@ -1564,7 +1567,7 @@ def _distribute_resources(
         ensure_image(image, dry_run=dry_run)
         if model:
             click.echo(f"Ensuring model {model} is available locally...")
-            download_model(model, cache_dir=cache_dir, dry_run=dry_run)
+            download_model(model, cache_dir=cache_dir, revision=model_revision, dry_run=dry_run)
         return None  # let runtime handle its own local IB detection
 
     ssh_kwargs = build_ssh_kwargs(config)
@@ -1606,6 +1609,7 @@ def _distribute_resources(
         mdl_failed = distribute_model_from_local(
             model, host_list,
             cache_dir=cache_dir,
+            revision=model_revision,
             transfer_hosts=transfer_hosts,
             dry_run=dry_run, **ssh_kwargs,
         )

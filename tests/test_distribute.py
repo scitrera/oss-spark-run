@@ -649,7 +649,7 @@ class TestDistributeModelFromLocal:
         from sparkrun.models.distribute import distribute_model_from_local
         distribute_model_from_local("org/model", ["h1"], cache_dir="/custom/cache")
         mock_dl.assert_called_once_with(
-            "org/model", cache_dir="/custom/cache", token=None, dry_run=False,
+            "org/model", cache_dir="/custom/cache", token=None, revision=None, dry_run=False,
         )
         # Rsync path should use custom cache
         assert "/custom/cache/hub/models--org--model" in mock_rsync.call_args[0][0]

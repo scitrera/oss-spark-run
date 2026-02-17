@@ -149,11 +149,52 @@ def resolve_gguf_container_path(
 # Cache checking
 # ---------------------------------------------------------------------------
 
-def is_model_cached(model_id: str, cache_dir: str | None = None) -> bool:
+def _snapshot_dirs_for_revision(
+    model_cache: Path,
+    snapshots: Path,
+    revision: str,
+) -> list[Path]:
+    """Resolve snapshot directories for a specific revision.
+
+    A revision may be a branch/tag name (stored in ``refs/{name}``) or
+    a commit hash (which is the snapshot directory name itself).
+    """
+    dirs: list[Path] = []
+
+    # Check refs/{revision} → commit hash → snapshots/{hash}/
+    refs_file = model_cache / "refs" / revision
+    if refs_file.exists():
+        commit_hash = refs_file.read_text().strip()
+        candidate = snapshots / commit_hash
+        if candidate.is_dir():
+            dirs.append(candidate)
+
+    # Also check if revision is itself a commit hash (direct snapshot dir)
+    candidate = snapshots / revision
+    if candidate.is_dir() and candidate not in dirs:
+        dirs.append(candidate)
+
+    return dirs
+
+
+def is_model_cached(
+    model_id: str,
+    cache_dir: str | None = None,
+    revision: str | None = None,
+) -> bool:
     """Check if a model is already cached locally.
 
     Inspects the HuggingFace cache directory structure to determine
-    whether the model has been previously downloaded.
+    whether the model has been previously downloaded.  For standard
+    (non-GGUF) models, verifies that at least one model weight file
+    (``*.safetensors``, ``*.bin``, ``*.pt``, or ``*.gguf``) exists in a
+    snapshot directory — a directory containing only ``config.json``
+    (e.g. from a VRAM auto-detect fetch) does not count as fully cached.
+
+    When *revision* is specified, only the snapshot matching that
+    revision is checked (via ``refs/{revision}`` or direct commit hash).
+    Without a revision, defaults to checking ``refs/main`` (matching
+    ``snapshot_download``'s default), with a fallback to any snapshot.
 
     For GGUF models with a quant variant (``repo:quant``), checks
     whether a matching ``.gguf`` file exists in the cache.
@@ -162,19 +203,44 @@ def is_model_cached(model_id: str, cache_dir: str | None = None) -> bool:
         model_id: HuggingFace model identifier (e.g. ``"meta-llama/Llama-3-8B"``)
             or GGUF spec (e.g. ``"Qwen/Qwen3-1.7B-GGUF:Q4_K_M"``).
         cache_dir: Override for the HuggingFace cache directory.
+        revision: Optional revision (branch, tag, or commit hash) to check.
 
     Returns:
-        True if the model cache directory exists and is non-empty.
+        True if model weight files are present in the cache.
     """
     # For GGUF models, check for the specific quant file
     if is_gguf_model(model_id):
         return resolve_gguf_path(model_id, cache_dir) is not None
 
     cache = Path(cache_dir or str(DEFAULT_HF_CACHE_DIR))
-    # HF cache structure: hub/models--org--name/
+    # HF cache structure: hub/models--org--name/snapshots/<hash>/
     safe_name = model_id.replace("/", "--")
     model_cache = cache / "hub" / f"models--{safe_name}"
-    return model_cache.exists() and any(model_cache.iterdir())
+    if not model_cache.exists():
+        return False
+
+    snapshots = model_cache / "snapshots"
+    if not snapshots.exists():
+        return False
+
+    weight_patterns = ("*.safetensors", "*.bin", "*.pt", "*.gguf")
+
+    # Determine which snapshot directories to check.
+    if revision:
+        # Explicit revision: only check that specific ref/hash, no fallback.
+        snapshot_dirs = _snapshot_dirs_for_revision(model_cache, snapshots, revision)
+    else:
+        # No revision: try refs/main first (snapshot_download's default),
+        # fall back to any snapshot for manually placed cache entries.
+        snapshot_dirs = _snapshot_dirs_for_revision(model_cache, snapshots, "main")
+        if not snapshot_dirs:
+            snapshot_dirs = [d for d in snapshots.iterdir() if d.is_dir()]
+
+    for snapshot_dir in snapshot_dirs:
+        for pattern in weight_patterns:
+            if any(snapshot_dir.glob(pattern)):
+                return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +251,7 @@ def download_model(
     model_id: str,
     cache_dir: str | None = None,
     token: str | None = None,
+    revision: str | None = None,
     dry_run: bool = False,
 ) -> int:
     """Download a model from HuggingFace Hub.
@@ -197,30 +264,43 @@ def download_model(
         model_id: HuggingFace model identifier or GGUF spec.
         cache_dir: Override for the HuggingFace cache directory.
         token: Optional HuggingFace API token for gated models.
+        revision: Optional revision (branch, tag, or commit hash).
         dry_run: If True, show what would be done without executing.
 
     Returns:
         Exit code (0 = success).
     """
     if is_gguf_model(model_id):
-        return _download_gguf(model_id, cache_dir=cache_dir, token=token, dry_run=dry_run)
+        return _download_gguf(
+            model_id, cache_dir=cache_dir, token=token,
+            revision=revision, dry_run=dry_run,
+        )
 
     cache = cache_dir or str(DEFAULT_HF_CACHE_DIR)
 
     if dry_run:
-        logger.info("[dry-run] Would download model: %s to %s", model_id, cache)
+        logger.info("[dry-run] Would download model: %s (revision=%s) to %s",
+                     model_id, revision or "latest", cache)
         return 0
 
-    if is_model_cached(model_id, cache):
+    if is_model_cached(model_id, cache, revision=revision):
         logger.info("Model %s already cached at %s", model_id, cache)
         return 0
 
-    logger.info("Downloading model: %s...", model_id)
+    logger.info("Downloading model: %s (revision=%s)...", model_id, revision or "latest")
 
     try:
         from huggingface_hub import snapshot_download
 
-        snapshot_download(model_id, cache_dir=_hub_cache(cache), token=token)
+        kwargs: dict = {
+            "repo_id": model_id,
+            "cache_dir": _hub_cache(cache),
+            "token": token,
+        }
+        if revision:
+            kwargs["revision"] = revision
+
+        snapshot_download(**kwargs)
         logger.info("Model downloaded successfully: %s", model_id)
         return 0
     except Exception as e:
@@ -232,6 +312,7 @@ def _download_gguf(
     model_id: str,
     cache_dir: str | None = None,
     token: str | None = None,
+    revision: str | None = None,
     dry_run: bool = False,
 ) -> int:
     """Download a GGUF model, fetching only the matching quant files.
@@ -243,6 +324,7 @@ def _download_gguf(
         model_id: GGUF model spec (e.g. ``"Qwen/Qwen3-1.7B-GGUF:Q4_K_M"``).
         cache_dir: Override for the HuggingFace cache directory.
         token: Optional HuggingFace API token.
+        revision: Optional revision (branch, tag, or commit hash).
         dry_run: If True, show what would be done without executing.
 
     Returns:
@@ -252,8 +334,8 @@ def _download_gguf(
     cache = cache_dir or str(DEFAULT_HF_CACHE_DIR)
 
     if dry_run:
-        logger.info("[dry-run] Would download GGUF model: %s (quant=%s) to %s",
-                     repo_id, quant, cache)
+        logger.info("[dry-run] Would download GGUF model: %s (quant=%s, revision=%s) to %s",
+                     repo_id, quant, revision or "latest", cache)
         return 0
 
     # Check if matching GGUF file already cached
@@ -261,12 +343,19 @@ def _download_gguf(
         logger.info("GGUF model %s already cached", model_id)
         return 0
 
-    logger.info("Downloading GGUF model: %s (quant=%s)...", repo_id, quant or "any")
+    logger.info("Downloading GGUF model: %s (quant=%s, revision=%s)...",
+                 repo_id, quant or "any", revision or "latest")
 
     try:
         from huggingface_hub import snapshot_download
 
-        kwargs: dict = {"repo_id": repo_id, "cache_dir": _hub_cache(cache), "token": token}
+        kwargs: dict = {
+            "repo_id": repo_id,
+            "cache_dir": _hub_cache(cache),
+            "token": token,
+        }
+        if revision:
+            kwargs["revision"] = revision
         if quant:
             # Download only files matching the quant variant
             kwargs["allow_patterns"] = ["*%s*" % quant]

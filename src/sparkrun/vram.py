@@ -112,8 +112,15 @@ def parse_param_count(value: int | float | str) -> int | None:
     return None
 
 
-def fetch_model_config(model_id: str) -> dict[str, Any] | None:
+def fetch_model_config(
+    model_id: str,
+    revision: str | None = None,
+) -> dict[str, Any] | None:
     """Fetch model config.json from HuggingFace Hub without downloading weights.
+
+    Args:
+        model_id: HuggingFace model identifier.
+        revision: Optional revision (branch, tag, or commit hash).
 
     Returns the config dict or None on failure.
     """
@@ -121,7 +128,10 @@ def fetch_model_config(model_id: str) -> dict[str, Any] | None:
         from huggingface_hub import hf_hub_download
         import json
 
-        config_path = hf_hub_download(repo_id=model_id, filename="config.json")
+        kwargs: dict[str, Any] = {"repo_id": model_id, "filename": "config.json"}
+        if revision:
+            kwargs["revision"] = revision
+        config_path = hf_hub_download(**kwargs)
         with open(config_path) as f:
             return json.load(f)
     except Exception as e:

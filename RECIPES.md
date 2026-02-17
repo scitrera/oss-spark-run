@@ -31,6 +31,7 @@ command: |
 
 ```yaml
 model: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4
+model_revision: abc123def          # optional: pin to a specific HF revision
 runtime: vllm
 min_nodes: 1
 container: scitrera/dgx-spark-vllm:0.16.0-t5
@@ -89,6 +90,34 @@ download only the matching quant files rather than the entire repository.
 The model value is injected into the command template as `{model}` and is also used for model pre-sync (downloading
 and distributing weights to target hosts before launch). (Models are downloaded to the local machine and then
 transferred to the cluster via `rsync` so you don't need to repeatedly download them from the Internet on a cluster.)
+
+#### `model_revision`
+
+Pin the model to a specific HuggingFace revision (branch, tag, or commit hash). When omitted, HuggingFace
+defaults to the `main` branch.
+
+```yaml
+# Pin to a specific commit
+model: QuantTrio/MiniMax-M2.5-AWQ
+model_revision: bbe738792c
+
+# Pin to a release tag
+model: Qwen/Qwen3-1.7B
+model_revision: v1.0
+
+# Pin a GGUF model to a specific revision
+model: Qwen/Qwen3-1.7B-GGUF:Q4_K_M
+model_revision: v1.0
+```
+
+This affects:
+- **Model download**: `snapshot_download` fetches the pinned revision instead of `main`.
+- **Cache checking**: sparkrun verifies that the *specific revision* is cached, not just any version of the model.
+- **VRAM estimation**: `config.json` is fetched from the pinned revision for auto-detection of model parameters.
+- **Model sync**: the `--revision` flag is passed to `huggingface-cli download` on remote hosts.
+
+Use `model_revision` when you need reproducible deployments — without it, a model's `main` branch may change
+between downloads. Pinning to a commit hash guarantees byte-identical weights across all nodes.
 
 #### `runtime` (required)
 

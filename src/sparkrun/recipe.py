@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 _KNOWN_KEYS = {
     "sparkrun_version", "recipe_version", "name", "description", "model",
+    "model_revision",
     "runtime", "runtime_version", "mode", "min_nodes", "max_nodes",
     "container", "defaults", "env", "command", "runtime_config",
     "cluster_only", "solo_only",
@@ -65,6 +66,7 @@ class Recipe:
         self.name: str = data.get("name", default_name)
         self.description: str = data.get("description", "")
         self.model: str = data.get("model", "")
+        self.model_revision: str | None = data.get("model_revision")
         self.runtime: str = data.get("runtime", "vllm")
         self.runtime_version: str = data.get("runtime_version", "")
 
@@ -276,7 +278,7 @@ class Recipe:
                                       and (not num_layers or not num_kv_heads or not head_dim)
                               )
             if needs_detection:
-                hf_config = fetch_model_config(self.model)
+                hf_config = fetch_model_config(self.model, revision=self.model_revision)
                 if hf_config:
                     hf_info = extract_model_info(hf_config)
                     # Fill in missing fields (metadata takes precedence)
