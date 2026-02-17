@@ -107,7 +107,7 @@ are automatically detected as `eugr-vllm`.
 #### `container` (required)
 
 The Docker/OCI container image to run. This should be a fully qualified image reference. Since we're using docker, 
-docker.io is assumed by default (that's part of docker). You can also use a local image or private registry, but your
+docker.io is assumed by default (that's part of docker). You can also use a local image or private registry, but you're
 responsible for making sure it's configured on your local system. The image will be pushed out to the cluster from the
 local machine to avoid repeated downloads from the Internet.
 
