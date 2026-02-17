@@ -359,8 +359,16 @@ def run(
         host_list = host_list[:1]
 
     # Derive deterministic cluster_id from recipe + (trimmed) hosts
-    from sparkrun.orchestration.docker import generate_cluster_id
+    from sparkrun.orchestration.docker import generate_cluster_id, save_job_metadata
     cluster_id = generate_cluster_id(recipe, host_list)
+
+    # Cache job metadata for later lookup by cluster status
+    if not dry_run:
+        try:
+            save_job_metadata(cluster_id, recipe, host_list,
+                              overrides=overrides, cache_dir=str(config.cache_dir))
+        except Exception:
+            pass  # non-critical; don't block launch
 
     # Resolve container image
     container_image = runtime.resolve_container(recipe, overrides)
@@ -1265,6 +1273,165 @@ def cluster_default(ctx):
     click.echo(f"Hosts ({len(c.hosts)}):")
     for h in c.hosts:
         click.echo(f"  - {h}")
+
+
+@cluster.command("status")
+@click.option("--hosts", "-H", default=None, help="Comma-separated host list")
+@click.option("--hosts-file", default=None, help="File with hosts (one per line, # comments)")
+@click.option("--cluster", "cluster_name", default=None, help="Use a saved cluster by name")
+@click.option("--dry-run", "-n", is_flag=True, help="Show what would be done")
+# @click.option("--config", "config_path", default=None, help="Path to config file")
+@click.pass_context
+def cluster_status(ctx, hosts, hosts_file, cluster_name, dry_run, config_path=None):
+    """Show sparkrun containers running on cluster hosts.
+
+    Lists all Docker containers whose names start with sparkrun_ on each
+    host.  Accepts the same host-resolution flags as run/stop/logs.
+
+    Examples:
+
+      sparkrun cluster status --hosts 192.168.11.13,192.168.11.14
+
+      sparkrun cluster status --cluster mylab
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from sparkrun.config import SparkrunConfig, get_config_root
+    from sparkrun.hosts import resolve_hosts
+    from sparkrun.cluster_manager import ClusterManager
+    from sparkrun.orchestration.ssh import run_remote_command
+    from sparkrun.orchestration.primitives import build_ssh_kwargs
+
+    config = SparkrunConfig(config_path) if config_path else SparkrunConfig()
+    cluster_mgr = ClusterManager(get_config_root())
+
+    host_list = resolve_hosts(
+        hosts=hosts,
+        hosts_file=hosts_file,
+        cluster_name=cluster_name,
+        cluster_manager=cluster_mgr,
+        config_default_hosts=config.default_hosts,
+    )
+    if not host_list:
+        click.echo("Error: No hosts specified. Use --hosts or configure defaults.", err=True)
+        sys.exit(1)
+
+    ssh_kwargs = build_ssh_kwargs(config)
+    docker_cmd = (
+        "docker ps --filter 'name=sparkrun_' "
+        "--format '{{.Names}}\\t{{.Status}}\\t{{.Image}}'"
+    )
+
+    if dry_run:
+        click.echo("[dry-run] Would run on %d host(s): %s" % (len(host_list), docker_cmd))
+        return
+
+    # Query all hosts in parallel
+    with ThreadPoolExecutor(max_workers=len(host_list)) as executor:
+        futures = {
+            executor.submit(
+                run_remote_command, host, docker_cmd, timeout=15, **ssh_kwargs,
+            ): host
+            for host in host_list
+        }
+        results = {}
+        for future in as_completed(futures):
+            host = futures[future]
+            results[host] = future.result()
+
+    # Collect per-host container info: list of (name, status, image)
+    host_containers: dict[str, list[tuple[str, str, str]]] = {}
+    errors: dict[str, str] = {}
+    for host in host_list:
+        result = results[host]
+        if not result.success:
+            errors[host] = result.stderr.strip()
+            continue
+        entries = []
+        for line in result.stdout.strip().splitlines():
+            if not line.strip():
+                continue
+            parts = line.split("\t")
+            if len(parts) == 3:
+                entries.append((parts[0], parts[1], parts[2]))
+            else:
+                entries.append((line.strip(), "", ""))
+        host_containers[host] = entries
+
+    # Build cluster groups: cluster_id -> [(host, role, status, image), ...]
+    # Anything ending in _solo is standalone; everything else is grouped
+    # by cluster_id (name up to last underscore-delimited role suffix).
+    groups: dict[str, list[tuple[str, str, str, str]]] = {}  # cluster_id -> entries
+    solo_entries: list[tuple[str, str, str, str]] = []  # (host, name, status, image)
+
+    for host in host_list:
+        for name, status, image in host_containers.get(host, []):
+            if name.endswith("_solo"):
+                solo_entries.append((host, name, status, image))
+            else:
+                # Extract cluster_id by stripping the role suffix.
+                # Patterns: sparkrun_hash_head, sparkrun_hash_worker,
+                #           sparkrun_hash_node_0 (SGLang)
+                # Strategy: find the cluster_id prefix (sparkrun_{12-char hash})
+                # and treat the rest as the role.
+                prefix_end = name.find("_", len("sparkrun_"))
+                if 0 < prefix_end < len(name) - 1:
+                    cluster_id = name[:prefix_end]
+                    role = name[prefix_end + 1:]
+                else:
+                    cluster_id = name
+                    role = "?"
+                groups.setdefault(cluster_id, []).append((host, role, status, image))
+
+    # Load cached job metadata for enriched display
+    from sparkrun.orchestration.docker import load_job_metadata
+
+    def _job_label(cid):
+        meta = load_job_metadata(cid, cache_dir=str(config.cache_dir))
+        if meta:
+            label = meta.get("recipe", cid)
+            tp = meta.get("tensor_parallel")
+            if tp:
+                label += f"  (tp={tp})"
+            return label
+        return cid
+
+    # Display grouped clusters
+    total_containers = 0
+    if groups:
+        for cid, members in sorted(groups.items()):
+            click.echo(f"Job: {_job_label(cid)}  ({len(members)} container(s))")
+            for host, role, status, image in members:
+                click.echo(f"  {role:<10s} {host:<25s} {status:<25s} {image}")
+                total_containers += 1
+            click.echo()
+
+    # Display solo / ungrouped containers
+    if solo_entries:
+        for host, name, status, image in solo_entries:
+            # Solo container name is the cluster_id + _solo
+            cid = name.removesuffix("_solo")
+            label = _job_label(cid)
+            click.echo(f"  {label:<40s} {host:<25s} {status:<25s} {image}")
+            total_containers += 1
+        click.echo()
+
+    # Display errors
+    for host in host_list:
+        if host in errors:
+            click.echo(f"  {host}: Error: {errors[host]}")
+
+    # Display hosts with no containers
+    idle_hosts = [h for h in host_list if h not in errors and not host_containers.get(h)]
+    if idle_hosts:
+        click.echo("Idle hosts (no sparkrun containers):")
+        for h in idle_hosts:
+            click.echo(f"  {h}")
+        click.echo()
+
+    if total_containers == 0 and not errors:
+        click.echo("No sparkrun containers running.")
+    else:
+        click.echo(f"Total: {total_containers} container(s) across {len(host_list)} host(s)")
 
 
 @main.group()
