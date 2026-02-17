@@ -269,6 +269,15 @@ Host spark2
 
 Solo mode (`--solo`) runs on a single host and still uses SSH unless the target is `localhost`.
 
+### Docker Group
+
+sparkrun launches containers via `docker` on each host. The SSH user must be a member of the `docker` group
+on every cluster node:
+
+```bash
+sudo usermod -aG docker "$USER"
+```
+
 ## Recipes
 
 A recipe is a YAML file:
