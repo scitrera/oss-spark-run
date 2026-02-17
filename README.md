@@ -427,8 +427,8 @@ the local copy without re-downloading.
 
 | Command                                       | Description                              |
 |-----------------------------------------------|------------------------------------------|
-| `sparkrun cluster create <name>`              | Create a new named cluster               |
-| `sparkrun cluster update <name>`              | Update hosts or description of a cluster |
+| `sparkrun cluster create <name>`              | Create a new named cluster (`--user` sets SSH user) |
+| `sparkrun cluster update <name>`              | Update hosts, description, or user of a cluster |
 | `sparkrun cluster list`                       | List all saved clusters                  |
 | `sparkrun cluster show <name>`                | Show details of a saved cluster          |
 | `sparkrun cluster delete <name>`              | Delete a saved cluster                   |

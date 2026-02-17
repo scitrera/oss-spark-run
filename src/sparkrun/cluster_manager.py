@@ -22,6 +22,10 @@ class ClusterError(Exception):
     pass
 
 
+# Sentinel for "not provided" to distinguish from explicit None
+_UNSET = object()
+
+
 @dataclass
 class ClusterDefinition:
     """Definition of a named cluster."""
@@ -29,6 +33,7 @@ class ClusterDefinition:
     name: str
     hosts: list[str]
     description: str = ""
+    user: str | None = None
 
 
 class ClusterManager:
@@ -68,13 +73,14 @@ class ClusterManager:
         """Get path to cluster YAML file."""
         return self.clusters_dir / f"{name}.yaml"
 
-    def create(self, name: str, hosts: list[str], description: str = "") -> None:
+    def create(self, name: str, hosts: list[str], description: str = "", user: str | None = None) -> None:
         """Create a new named cluster.
 
         Args:
             name: Cluster name
             hosts: List of host addresses
             description: Optional cluster description
+            user: Optional SSH username for this cluster
 
         Raises:
             ClusterError: If cluster already exists or name is invalid
@@ -85,7 +91,7 @@ class ClusterManager:
         if cluster_path.exists():
             raise ClusterError(f"Cluster '{name}' already exists")
 
-        cluster_def = ClusterDefinition(name=name, hosts=hosts, description=description)
+        cluster_def = ClusterDefinition(name=name, hosts=hosts, description=description, user=user)
         self._write_cluster(cluster_def)
         logger.info("Created cluster '%s' with %d hosts", name, len(hosts))
 
@@ -107,13 +113,20 @@ class ClusterManager:
 
         return self._read_cluster(cluster_path)
 
-    def update(self, name: str, hosts: list[str] | None = None, description: str | None = None) -> None:
+    def update(
+        self,
+        name: str,
+        hosts: list[str] | None = None,
+        description: str | None = None,
+        user: str | None = _UNSET,
+    ) -> None:
         """Update existing cluster definition.
 
         Args:
             name: Cluster name
             hosts: New host list (if provided)
             description: New description (if provided)
+            user: SSH username (if provided; pass ``None`` explicitly to clear)
 
         Raises:
             ClusterError: If cluster does not exist
@@ -129,6 +142,10 @@ class ClusterManager:
         if description is not None:
             cluster_def.description = description
             logger.debug("Updated description for cluster '%s'", name)
+
+        if user is not _UNSET:
+            cluster_def.user = user
+            logger.debug("Updated user for cluster '%s'", name)
 
         # Write back
         self._write_cluster(cluster_def)
@@ -229,6 +246,8 @@ class ClusterManager:
             "hosts": cluster_def.hosts,
             "description": cluster_def.description,
         }
+        if cluster_def.user is not None:
+            data["user"] = cluster_def.user
 
         with cluster_path.open("w") as f:
             yaml.dump(data, f, default_flow_style=False, sort_keys=False)
@@ -247,4 +266,5 @@ class ClusterManager:
             name=data.get("name", ""),
             hosts=data.get("hosts", []),
             description=data.get("description", ""),
+            user=data.get("user"),
         )

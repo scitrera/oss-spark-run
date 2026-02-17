@@ -785,7 +785,7 @@ def setup_ssh(ctx, hosts, hosts_file, cluster_name, user, dry_run):
 
     config = SparkrunConfig()
 
-    # Resolve hosts
+    # Resolve hosts and look up cluster user if applicable
     cluster_mgr = ClusterManager(get_config_root())
     host_list = resolve_hosts(
         hosts=hosts,
@@ -794,6 +794,18 @@ def setup_ssh(ctx, hosts, hosts_file, cluster_name, user, dry_run):
         cluster_manager=cluster_mgr,
         config_default_hosts=config.default_hosts,
     )
+
+    # Determine the cluster's configured user (if hosts came from a cluster)
+    cluster_user = None
+    resolved_cluster_name = cluster_name
+    if not resolved_cluster_name and not hosts and not hosts_file:
+        resolved_cluster_name = cluster_mgr.get_default()
+    if resolved_cluster_name:
+        try:
+            cluster_def = cluster_mgr.get(resolved_cluster_name)
+            cluster_user = cluster_def.user
+        except Exception:
+            pass
 
     if not host_list:
         click.echo("Error: No hosts specified. Use --hosts, --hosts-file, or --cluster.", err=True)
@@ -806,9 +818,9 @@ def setup_ssh(ctx, hosts, hosts_file, cluster_name, user, dry_run):
         )
         sys.exit(1)
 
-    # Default user: --user flag > config ssh.user > OS user
+    # Default user: --user flag > cluster user > config ssh.user > OS user
     if user is None:
-        user = config.ssh_user or os.environ.get("USER", "root")
+        user = cluster_user or config.ssh_user or os.environ.get("USER", "root")
 
     # Locate the bundled script
     from sparkrun.scripts import get_script_path
@@ -998,8 +1010,9 @@ def cluster(ctx):
 @click.option("--hosts", "-H", default=None, help="Comma-separated host list")
 @click.option("--hosts-file", default=None, help="File with hosts (one per line)")
 @click.option("-d", "--description", default="", help="Cluster description")
+@click.option("--user", "-u", default=None, help="SSH username for this cluster")
 @click.pass_context
-def cluster_create(ctx, name, hosts, hosts_file, description):
+def cluster_create(ctx, name, hosts, hosts_file, description, user):
     """Create a new named cluster."""
     from sparkrun.cluster_manager import ClusterManager, ClusterError
     from sparkrun.config import get_config_root
@@ -1015,7 +1028,7 @@ def cluster_create(ctx, name, hosts, hosts_file, description):
 
     mgr = ClusterManager(get_config_root())
     try:
-        mgr.create(name, host_list, description)
+        mgr.create(name, host_list, description, user=user)
         click.echo(f"Cluster '{name}' created with {len(host_list)} host(s).")
     except ClusterError as e:
         click.echo(f"Error: {e}", err=True)
@@ -1027,8 +1040,9 @@ def cluster_create(ctx, name, hosts, hosts_file, description):
 @click.option("--hosts", "-H", default=None, help="Comma-separated host list")
 @click.option("--hosts-file", default=None, help="File with hosts (one per line)")
 @click.option("-d", "--description", default=None, help="Cluster description")
+@click.option("--user", "-u", default=None, help="SSH username for this cluster")
 @click.pass_context
-def cluster_update(ctx, name, hosts, hosts_file, description):
+def cluster_update(ctx, name, hosts, hosts_file, description, user):
     """Update an existing cluster."""
     from sparkrun.cluster_manager import ClusterManager, ClusterError
     from sparkrun.config import get_config_root
@@ -1040,13 +1054,13 @@ def cluster_update(ctx, name, hosts, hosts_file, description):
     elif hosts_file:
         host_list = parse_hosts_file(hosts_file)
 
-    if host_list is None and description is None:
-        click.echo("Error: Nothing to update. Provide --hosts, --hosts-file, or -d.", err=True)
+    if host_list is None and description is None and user is None:
+        click.echo("Error: Nothing to update. Provide --hosts, --hosts-file, -d, or --user.", err=True)
         sys.exit(1)
 
     mgr = ClusterManager(get_config_root())
     try:
-        mgr.update(name, hosts=host_list, description=description)
+        mgr.update(name, hosts=host_list, description=description, user=user)
         click.echo(f"Cluster '{name}' updated.")
     except ClusterError as e:
         click.echo(f"Error: {e}", err=True)
@@ -1104,6 +1118,8 @@ def cluster_show(ctx, name):
     default_name = mgr.get_default()
     click.echo(f"Name:        {c.name}")
     click.echo(f"Description: {c.description or '(none)'}")
+    if c.user:
+        click.echo(f"User:        {c.user}")
     click.echo(f"Default:     {'yes' if c.name == default_name else 'no'}")
     click.echo(f"Hosts ({len(c.hosts)}):")
     for h in c.hosts:

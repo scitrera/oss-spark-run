@@ -386,6 +386,53 @@ class TestClusterCommands:
         assert result.exit_code == 0
         assert "updated" in result.output.lower()
 
+    def test_cluster_create_with_user(self, runner, tmp_path, monkeypatch):
+        """Test creating a cluster with --user."""
+        config_root = tmp_path / "config"
+        config_root.mkdir()
+        import sparkrun.config
+        monkeypatch.setattr(sparkrun.config, "DEFAULT_CONFIG_DIR", config_root)
+
+        result = runner.invoke(main, [
+            "cluster", "create", "my-cluster",
+            "--hosts", "host1,host2",
+            "--user", "dgxuser",
+        ])
+        assert result.exit_code == 0
+
+        # Verify user is stored and shown
+        result = runner.invoke(main, ["cluster", "show", "my-cluster"])
+        assert result.exit_code == 0
+        assert "dgxuser" in result.output
+
+    def test_cluster_create_without_user(self, runner, tmp_path, monkeypatch):
+        """Test that cluster created without --user does not show User field."""
+        config_root = tmp_path / "config"
+        config_root.mkdir()
+        import sparkrun.config
+        monkeypatch.setattr(sparkrun.config, "DEFAULT_CONFIG_DIR", config_root)
+
+        runner.invoke(main, [
+            "cluster", "create", "no-user-cluster",
+            "--hosts", "host1,host2",
+        ])
+        result = runner.invoke(main, ["cluster", "show", "no-user-cluster"])
+        assert result.exit_code == 0
+        assert "User:" not in result.output
+
+    def test_cluster_update_user(self, runner, cluster_setup):
+        """Test updating cluster user."""
+        result = runner.invoke(main, [
+            "cluster", "update", "test-cluster",
+            "--user", "newuser",
+        ])
+        assert result.exit_code == 0
+        assert "updated" in result.output.lower()
+
+        # Verify user is shown
+        result = runner.invoke(main, ["cluster", "show", "test-cluster"])
+        assert "newuser" in result.output
+
 
 class TestRunWithCluster:
     """Test run command with --cluster and --hosts-file options."""
@@ -812,6 +859,47 @@ class TestSetupSshCommand:
             assert "mesh_ssh_keys.sh" in cmd[1]
             assert cmd[2] == "testuser"
             assert cmd[3:] == ["10.0.0.1", "10.0.0.2"]
+
+    def test_setup_ssh_uses_cluster_user(self, runner, tmp_path, monkeypatch):
+        """Test that setup ssh picks up the cluster's configured user."""
+        config_root = tmp_path / "config"
+        config_root.mkdir()
+        import sparkrun.config
+        monkeypatch.setattr(sparkrun.config, "DEFAULT_CONFIG_DIR", config_root)
+
+        from sparkrun.cluster_manager import ClusterManager
+        mgr = ClusterManager(config_root)
+        mgr.create("usercluster", ["10.0.0.1", "10.0.0.2"], user="dgxuser")
+
+        result = runner.invoke(main, [
+            "setup", "ssh",
+            "--cluster", "usercluster",
+            "--dry-run",
+        ])
+        assert result.exit_code == 0
+        assert "dgxuser" in result.output
+
+    def test_setup_ssh_cli_user_overrides_cluster_user(self, runner, tmp_path, monkeypatch):
+        """Test that --user flag overrides the cluster's configured user."""
+        config_root = tmp_path / "config"
+        config_root.mkdir()
+        import sparkrun.config
+        monkeypatch.setattr(sparkrun.config, "DEFAULT_CONFIG_DIR", config_root)
+
+        from sparkrun.cluster_manager import ClusterManager
+        mgr = ClusterManager(config_root)
+        mgr.create("usercluster2", ["10.0.0.1", "10.0.0.2"], user="dgxuser")
+
+        result = runner.invoke(main, [
+            "setup", "ssh",
+            "--cluster", "usercluster2",
+            "--user", "override_user",
+            "--dry-run",
+        ])
+        assert result.exit_code == 0
+        assert "override_user" in result.output
+        # The cluster user should NOT appear in the command
+        assert "dgxuser" not in result.output
 
 
 class TestLogCommand:
