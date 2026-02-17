@@ -24,4 +24,5 @@ command: |
       --ctx-size {ctx_size} \
       --flash-attn on \
       --jinja \
-      --no-webui
+      --no-webui \
+      --no-mmap
