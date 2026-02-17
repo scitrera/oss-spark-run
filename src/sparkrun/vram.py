@@ -26,6 +26,9 @@ _DTYPE_BYTES: dict[str, float] = {
     "awq8": 1.110,  # approximated value
     "gptq": 0.5,
     "mxfp4": 0.5,
+    # TODO: GGUF quants
+    'q4_k_m': 0.5,
+    'q8_0': 1.0,
 }
 
 # Shorthand suffixes for parameter counts

@@ -372,6 +372,7 @@ class RuntimePlugin(Plugin):
         # Step 3: Execute serve command
         t0 = time.monotonic()
         logger.info("Step 3/3: Executing serve command in %s...", container_name)
+        logger.debug("Serve command: %s", serve_command)
         exec_script = generate_exec_serve_script(
             container_name=container_name,
             serve_command=serve_command,

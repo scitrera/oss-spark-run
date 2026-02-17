@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sparkrun"
-version = "0.0.5"
+version = "0.0.6"
 description = "Launch and manage Docker-based inference workloads on NVIDIA DGX Spark systems"
 readme = "README.md"
 license = "Apache-2.0"
@@ -45,6 +45,7 @@ sparkrun = "sparkrun.cli:main"
 vllm = "sparkrun.runtimes.vllm:VllmRuntime"
 sglang = "sparkrun.runtimes.sglang:SglangRuntime"
 eugr-vllm = "sparkrun.runtimes.eugr_vllm:EugrVllmRuntime"
+llama-cpp = "sparkrun.runtimes.llama_cpp:LlamaCppRuntime"
 
 [tool.setuptools.packages.find]
 where = ["src"]

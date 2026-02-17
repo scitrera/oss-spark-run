@@ -9,6 +9,7 @@ from sparkrun.recipe import Recipe
 from sparkrun.runtimes.vllm import VllmRuntime
 from sparkrun.runtimes.sglang import SglangRuntime
 from sparkrun.runtimes.eugr_vllm import EugrVllmRuntime
+from sparkrun.runtimes.llama_cpp import LlamaCppRuntime
 from sparkrun.runtimes.base import RuntimePlugin
 
 
@@ -587,3 +588,317 @@ class TestEugrFollowLogs:
         )
 
         mock_stream.assert_not_called()
+
+
+# --- LlamaCppRuntime Tests ---
+
+def test_llama_cpp_runtime_name():
+    """LlamaCppRuntime.runtime_name == 'llama-cpp'."""
+    runtime = LlamaCppRuntime()
+    assert runtime.runtime_name == "llama-cpp"
+
+
+def test_llama_cpp_cluster_strategy():
+    """LlamaCppRuntime uses native (RPC) clustering, not Ray."""
+    runtime = LlamaCppRuntime()
+    assert runtime.cluster_strategy() == "native"
+
+
+def test_llama_cpp_resolve_container_from_recipe():
+    """Recipe with container field."""
+    recipe_data = {
+        "name": "test-recipe",
+        "model": "Qwen/Qwen3-1.7B-GGUF:Q4_K_M",
+        "runtime": "llama-cpp",
+        "container": "custom-llama:v1.0",
+    }
+    recipe = Recipe.from_dict(recipe_data)
+    runtime = LlamaCppRuntime()
+
+    container = runtime.resolve_container(recipe)
+    assert container == "custom-llama:v1.0"
+
+
+def test_llama_cpp_resolve_container_default():
+    """Recipe without container uses default prefix."""
+    recipe_data = {
+        "name": "test-recipe",
+        "model": "Qwen/Qwen3-1.7B-GGUF:Q4_K_M",
+        "runtime": "llama-cpp",
+    }
+    recipe = Recipe.from_dict(recipe_data)
+    runtime = LlamaCppRuntime()
+
+    container = runtime.resolve_container(recipe)
+    assert container == "scitrera/dgx-spark-llama-cpp:latest"
+
+
+def test_llama_cpp_generate_command_from_template():
+    """Recipe with command template renders correctly."""
+    recipe_data = {
+        "name": "test-recipe",
+        "model": "Qwen/Qwen3-1.7B-GGUF:Q4_K_M",
+        "runtime": "llama-cpp",
+        "command": "llama-server -hf {model} --port {port}",
+        "defaults": {"port": 8080},
+    }
+    recipe = Recipe.from_dict(recipe_data)
+    runtime = LlamaCppRuntime()
+
+    cmd = runtime.generate_command(recipe, {}, is_cluster=False)
+    assert cmd == "llama-server -hf Qwen/Qwen3-1.7B-GGUF:Q4_K_M --port 8080"
+
+
+def test_llama_cpp_generate_command_structured_hf():
+    """HuggingFace model (contains '/') uses -hf flag."""
+    recipe_data = {
+        "name": "test-recipe",
+        "model": "Qwen/Qwen3-1.7B-GGUF:Q4_K_M",
+        "runtime": "llama-cpp",
+        "defaults": {
+            "port": 8080,
+            "n_gpu_layers": 99,
+            "ctx_size": 8192,
+        },
+    }
+    recipe = Recipe.from_dict(recipe_data)
+    runtime = LlamaCppRuntime()
+
+    cmd = runtime.generate_command(recipe, {}, is_cluster=False)
+    assert cmd.startswith("llama-server -hf Qwen/Qwen3-1.7B-GGUF:Q4_K_M")
+    assert "--port 8080" in cmd
+    assert "--n-gpu-layers 99" in cmd
+    assert "--ctx-size 8192" in cmd
+
+
+def test_llama_cpp_generate_command_gguf_path():
+    """Local .gguf path uses -m flag."""
+    recipe_data = {
+        "name": "test-recipe",
+        "model": "/models/qwen3-1.7b-q4_k_m.gguf",
+        "runtime": "llama-cpp",
+        "defaults": {"port": 8080},
+    }
+    recipe = Recipe.from_dict(recipe_data)
+    runtime = LlamaCppRuntime()
+
+    cmd = runtime.generate_command(recipe, {}, is_cluster=False)
+    assert cmd.startswith("llama-server -m /models/qwen3-1.7b-q4_k_m.gguf")
+    assert "--port 8080" in cmd
+
+
+def test_llama_cpp_generate_command_bool_flags():
+    """Boolean flags flash_attn, jinja, no_webui are handled."""
+    recipe_data = {
+        "name": "test-recipe",
+        "model": "Qwen/Qwen3-1.7B-GGUF:Q4_K_M",
+        "runtime": "llama-cpp",
+        "defaults": {
+            "flash_attn": True,
+            "jinja": True,
+            "no_webui": True,
+            "cont_batching": False,
+        },
+    }
+    recipe = Recipe.from_dict(recipe_data)
+    runtime = LlamaCppRuntime()
+
+    cmd = runtime.generate_command(recipe, {}, is_cluster=False)
+    assert "--flash-attn" in cmd
+    assert "--jinja" in cmd
+    assert "--no-webui" in cmd
+    # cont_batching is False, should not appear
+    assert "--cont-batching" not in cmd
+
+
+def test_llama_cpp_generate_command_overrides():
+    """CLI overrides properly override defaults."""
+    recipe_data = {
+        "name": "test-recipe",
+        "model": "Qwen/Qwen3-1.7B-GGUF:Q4_K_M",
+        "runtime": "llama-cpp",
+        "defaults": {"port": 8080},
+    }
+    recipe = Recipe.from_dict(recipe_data)
+    runtime = LlamaCppRuntime()
+
+    cmd = runtime.generate_command(recipe, {"port": 9090}, is_cluster=False)
+    assert "--port 9090" in cmd
+    assert "--port 8080" not in cmd
+
+
+def test_llama_cpp_validate_recipe_valid():
+    """Valid recipe returns no issues."""
+    recipe_data = {
+        "name": "test-recipe",
+        "model": "Qwen/Qwen3-1.7B-GGUF:Q4_K_M",
+        "runtime": "llama-cpp",
+    }
+    recipe = Recipe.from_dict(recipe_data)
+    runtime = LlamaCppRuntime()
+
+    issues = runtime.validate_recipe(recipe)
+    assert issues == []
+
+
+def test_llama_cpp_validate_recipe_no_model():
+    """Missing model returns issue."""
+    recipe_data = {
+        "name": "test-recipe",
+        "runtime": "llama-cpp",
+    }
+    recipe = Recipe.from_dict(recipe_data)
+    runtime = LlamaCppRuntime()
+
+    issues = runtime.validate_recipe(recipe)
+    assert len(issues) == 1
+    assert "model is required" in issues[0]
+
+
+def test_llama_cpp_build_rpc_head_command():
+    """_build_rpc_head_command appends --rpc with worker addresses."""
+    recipe_data = {
+        "name": "test-recipe",
+        "model": "Qwen/Qwen3-1.7B-GGUF:Q4_K_M",
+        "runtime": "llama-cpp",
+        "defaults": {"port": 8080, "n_gpu_layers": 99},
+    }
+    recipe = Recipe.from_dict(recipe_data)
+    runtime = LlamaCppRuntime()
+    config = recipe.build_config_chain({})
+
+    cmd = runtime._build_rpc_head_command(
+        recipe, config,
+        worker_hosts=["10.0.0.2", "10.0.0.3"],
+        rpc_port=50052,
+    )
+    assert "--rpc 10.0.0.2:50052,10.0.0.3:50052" in cmd
+    assert cmd.startswith("llama-server -hf Qwen/Qwen3-1.7B-GGUF:Q4_K_M")
+
+
+def test_llama_cpp_build_rpc_worker_command():
+    """_build_rpc_worker_command returns rpc-server with host and port."""
+    cmd = LlamaCppRuntime._build_rpc_worker_command(50052)
+    assert cmd == "rpc-server --host 0.0.0.0 --port 50052"
+
+
+def test_llama_cpp_container_name():
+    """_container_name returns {cluster_id}_{role}."""
+    assert LlamaCppRuntime._container_name("spark0", "head") == "spark0_head"
+    assert LlamaCppRuntime._container_name("spark0", "worker") == "spark0_worker"
+
+
+def test_llama_cpp_generate_command_gguf_presync_template():
+    """When _gguf_model_path is set, template renders with resolved path
+    and -hf is switched to -m."""
+    recipe_data = {
+        "name": "test-recipe",
+        "model": "Qwen/Qwen3-1.7B-GGUF:Q4_K_M",
+        "runtime": "llama-cpp",
+        "defaults": {
+            "port": 8080,
+            "host": "0.0.0.0",
+            "n_gpu_layers": 99,
+            "ctx_size": 8192,
+        },
+        "command": (
+            "llama-server \\\n"
+            "    -hf {model} \\\n"
+            "    --host {host} \\\n"
+            "    --port {port} \\\n"
+            "    --n-gpu-layers {n_gpu_layers} \\\n"
+            "    --ctx-size {ctx_size} \\\n"
+            "    --flash-attn \\\n"
+            "    --jinja \\\n"
+            "    --no-webui"
+        ),
+    }
+    recipe = Recipe.from_dict(recipe_data)
+    runtime = LlamaCppRuntime()
+
+    gguf_path = "/root/.cache/huggingface/hub/models--Qwen--Qwen3-1.7B-GGUF/snapshots/abc123/q4_k_m.gguf"
+    cmd = runtime.generate_command(
+        recipe,
+        {"_gguf_model_path": gguf_path, "model": gguf_path},
+        is_cluster=False,
+    )
+    # Template is respected: -hf switched to -m, path substituted
+    assert "-m " + gguf_path in cmd
+    assert "-hf " not in cmd
+    # Other flags from template are preserved
+    assert "--host 0.0.0.0" in cmd
+    assert "--port 8080" in cmd
+    assert "--n-gpu-layers 99" in cmd
+    assert "--ctx-size 8192" in cmd
+    assert "--flash-attn" in cmd
+    assert "--jinja" in cmd
+    assert "--no-webui" in cmd
+
+
+def test_llama_cpp_generate_command_gguf_presync_structured():
+    """When _gguf_model_path is set and no template, structured build uses -m."""
+    recipe_data = {
+        "name": "test-recipe",
+        "model": "Qwen/Qwen3-1.7B-GGUF:Q4_K_M",
+        "runtime": "llama-cpp",
+        "defaults": {"port": 8080, "n_gpu_layers": 99},
+    }
+    recipe = Recipe.from_dict(recipe_data)
+    runtime = LlamaCppRuntime()
+
+    gguf_path = "/root/.cache/huggingface/hub/models--Qwen--Qwen3-1.7B-GGUF/snapshots/abc123/q4_k_m.gguf"
+    cmd = runtime.generate_command(
+        recipe,
+        {"_gguf_model_path": gguf_path, "model": gguf_path},
+        is_cluster=False,
+    )
+    assert cmd.startswith("llama-server -m " + gguf_path)
+    assert "--port 8080" in cmd
+    assert "--n-gpu-layers 99" in cmd
+
+
+def test_llama_cpp_generate_command_no_presync_uses_hf():
+    """Without _gguf_model_path, template renders -hf with original model."""
+    recipe_data = {
+        "name": "test-recipe",
+        "model": "Qwen/Qwen3-1.7B-GGUF:Q4_K_M",
+        "runtime": "llama-cpp",
+        "defaults": {"port": 8080},
+        "command": "llama-server -hf {model} --port {port}",
+    }
+    recipe = Recipe.from_dict(recipe_data)
+    runtime = LlamaCppRuntime()
+
+    cmd = runtime.generate_command(recipe, {}, is_cluster=False)
+    assert "-hf Qwen/Qwen3-1.7B-GGUF:Q4_K_M" in cmd
+    assert "--port 8080" in cmd
+
+
+class TestLlamaCppFollowLogs:
+    """Test LlamaCppRuntime.follow_logs()."""
+
+    @mock.patch("sparkrun.orchestration.ssh.stream_container_file_logs")
+    def test_follow_logs_solo_uses_file_logs(self, mock_stream):
+        """Single-host llama-cpp tails serve log file inside solo container."""
+        runtime = LlamaCppRuntime()
+        runtime.follow_logs(
+            hosts=["10.0.0.1"],
+            cluster_id="test0",
+        )
+
+        mock_stream.assert_called_once()
+        assert mock_stream.call_args[0][1] == "test0_solo"
+
+    @mock.patch("sparkrun.orchestration.ssh.stream_remote_logs")
+    def test_follow_logs_cluster_uses_docker_logs_on_head(self, mock_stream):
+        """Multi-host llama-cpp follows docker logs on _head container."""
+        runtime = LlamaCppRuntime()
+        runtime.follow_logs(
+            hosts=["10.0.0.1", "10.0.0.2"],
+            cluster_id="mycluster",
+        )
+
+        mock_stream.assert_called_once()
+        args = mock_stream.call_args
+        assert args[0][0] == "10.0.0.1"
+        assert args[0][1] == "mycluster_head"

@@ -11,7 +11,7 @@ fi
 
 echo "Downloading model: {model_id}..."
 if command -v huggingface-cli &>/dev/null; then
-    huggingface-cli download "{model_id}" --cache-dir "{cache}"
+    huggingface-cli download "{model_id}" --cache-dir "{cache}/hub"
 else
     echo "ERROR: huggingface-cli not available on this host" >&2
     exit 1

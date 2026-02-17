@@ -25,8 +25,12 @@ def _model_cache_path(model_id: str, cache_dir: str) -> str:
     """Compute the HF cache path for a model.
 
     Mirrors the logic in :func:`sparkrun.models.download.is_model_cached`.
+    For GGUF model specs (``repo:quant``), strips the quant variant
+    since the cache directory is keyed by repository name only.
     """
-    safe_name = model_id.replace("/", "--")
+    from sparkrun.models.download import parse_gguf_model_spec
+    repo_id, _ = parse_gguf_model_spec(model_id)
+    safe_name = repo_id.replace("/", "--")
     return f"{cache_dir}/hub/models--{safe_name}"
 
 
@@ -144,7 +148,14 @@ def distribute_model_from_head(
                 model_id, head, len(hosts))
 
     # Step 1: download model on head
-    dl_script = read_script("model_sync.sh").format(model_id=model_id, cache=cache)
+    from sparkrun.models.download import is_gguf_model, parse_gguf_model_spec
+    if is_gguf_model(model_id):
+        repo_id, quant = parse_gguf_model_spec(model_id)
+        dl_script = read_script("model_sync_gguf.sh").format(
+            repo_id=repo_id, quant=quant or "", cache=cache,
+        )
+    else:
+        dl_script = read_script("model_sync.sh").format(model_id=model_id, cache=cache)
     dl_result = run_remote_script(
         head, dl_script,
         ssh_user=ssh_user, ssh_key=ssh_key, ssh_options=ssh_options,

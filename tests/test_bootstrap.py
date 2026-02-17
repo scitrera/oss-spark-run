@@ -43,8 +43,8 @@ def test_init_sparkrun_idempotent():
     assert v1 is v2
 
 
-def test_list_runtimes_discovers_all_three():
-    """Verify that all three runtimes are discovered: eugr-vllm, sglang, vllm.
+def test_list_runtimes_discovers_all():
+    """Verify that all runtimes are discovered.
 
     Tests the runtime plugin discovery mechanism.
     """
@@ -55,9 +55,10 @@ def test_list_runtimes_discovers_all_three():
     runtimes = list_runtimes(v=v)
 
     assert "eugr-vllm" in runtimes
+    assert "llama-cpp" in runtimes
     assert "sglang" in runtimes
     assert "vllm" in runtimes
-    assert len(runtimes) == 3
+    assert len(runtimes) == 4
 
 
 def test_get_runtime_vllm():

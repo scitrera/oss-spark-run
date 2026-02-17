@@ -341,9 +341,14 @@ def run(
                     % (effective_tp, effective_tp, original_count)
                 )
 
-    # Derive deterministic cluster_id from recipe + hosts
-    from sparkrun.orchestration.docker import generate_cluster_id
-    cluster_id = generate_cluster_id(recipe, host_list)
+    # Enforce max_nodes: trim host list if recipe caps node count.
+    # Must happen before cluster_id derivation so stop/logs match.
+    if recipe.max_nodes is not None and len(host_list) > recipe.max_nodes:
+        click.echo(
+            "Note: recipe max_nodes=%d, using %d of %d hosts"
+            % (recipe.max_nodes, recipe.max_nodes, len(host_list))
+        )
+        host_list = host_list[:recipe.max_nodes]
 
     # Determine mode
     is_solo = solo or len(host_list) <= 1
@@ -351,6 +356,11 @@ def run(
         click.echo("Warning: Recipe requires cluster mode but only one host specified", err=True)
     if recipe.mode == "solo":
         is_solo = True
+        host_list = host_list[:1]
+
+    # Derive deterministic cluster_id from recipe + (trimmed) hosts
+    from sparkrun.orchestration.docker import generate_cluster_id
+    cluster_id = generate_cluster_id(recipe, host_list)
 
     # Resolve container image
     container_image = runtime.resolve_container(recipe, overrides)
@@ -360,12 +370,27 @@ def run(
     # Always runs for non-delegating runtimes (hash checks make it cheap
     # when resources are already present on all hosts).
     nccl_env = None
+    effective_cache_dir = cache_dir or str(config.hf_cache_dir)
     if not runtime.is_delegating_runtime():
         nccl_env = _distribute_resources(
             container_image, recipe.model, host_list,
-            cache_dir or str(config.hf_cache_dir),
+            effective_cache_dir,
             config, dry_run, skip_ib,
         )
+
+    # For GGUF models that were pre-synced, resolve the container-internal
+    # cache path and inject it as the ``model`` override so the recipe
+    # command template renders ``{model}`` with the local path instead
+    # of the HF repo spec (which would re-download at serve time).
+    from sparkrun.models.download import is_gguf_model, resolve_gguf_container_path
+    if is_gguf_model(recipe.model) and not dry_run:
+        gguf_container_path = resolve_gguf_container_path(
+            recipe.model, effective_cache_dir,
+        )
+        if gguf_container_path:
+            overrides["_gguf_model_path"] = gguf_container_path
+            overrides["model"] = gguf_container_path
+            logger.info("GGUF model pre-synced, container path: %s", gguf_container_path)
 
     # Generate serve command for display
     serve_command = runtime.generate_command(
@@ -643,7 +668,6 @@ def setup_install(ctx, shell):
     any old aliases/functions from previous installs, and configures
     tab-completion.
     """
-    import shutil
     import subprocess
     from pathlib import Path
 
@@ -662,12 +686,7 @@ def setup_install(ctx, shell):
             sys.exit(1)
 
     # Step 1: Install sparkrun via uv tool
-    # noinspection PyDeprecation
-    uv = shutil.which("uv")
-    if not uv:
-        click.echo("Error: uv is required but not found on PATH.", err=True)
-        click.echo("Install uv first: pip install uv", err=True)
-        sys.exit(1)
+    uv = _require_uv()
 
     click.echo("Installing sparkrun via uv tool install...")
     result = subprocess.run(
@@ -697,6 +716,42 @@ def setup_install(ctx, shell):
 
     click.echo()
     click.echo("Restart your shell or run: source %s" % rc_file)
+
+
+def _require_uv() -> str:
+    """Return path to uv binary, or exit with an error message."""
+    import shutil
+    # noinspection PyDeprecation
+    uv = shutil.which("uv")
+    if not uv:
+        click.echo("Error: uv is required but not found on PATH.", err=True)
+        click.echo("Install uv first: pip install uv", err=True)
+        sys.exit(1)
+    return uv
+
+
+@setup.command("update")
+@click.pass_context
+def setup_update(ctx):
+    """Update sparkrun to the latest version.
+
+    Runs ``uv tool upgrade sparkrun`` to fetch the latest release.
+    """
+    import subprocess
+
+    uv = _require_uv()
+    click.echo("Updating sparkrun...")
+    result = subprocess.run(
+        [uv, "tool", "upgrade", "sparkrun"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        click.echo("Error updating sparkrun: %s" % result.stderr.strip(), err=True)
+        sys.exit(1)
+
+    # Show new version
+    from sparkrun import __version__
+    click.echo("sparkrun updated to %s" % __version__)
 
 
 @main.command()

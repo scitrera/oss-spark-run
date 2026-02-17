@@ -185,6 +185,15 @@ runtime_config:
   build_args: [ --some-flag ]
 ```
 
+### llama.cpp
+
+Support for [llama.cpp](https://github.com/ggml-org/llama.cpp) via `llama-server`. Solo mode with GGUF quantized models.
+Loads models directly from HuggingFace (e.g. `Qwen/Qwen3-1.7B-GGUF:Q4_K_M`). Lightweight alternative to vLLM/SGLang
+for smaller models or constrained environments.
+
+**Experimental**: Multi-node tensor-parallel inference via llama.cpp's RPC backend. Worker nodes run `rpc-server` and
+the head node connects via `--rpc`. This is still evolving upstream and should be considered experimental.
+
 ## How It Works
 
 **Recipes** are YAML files that describe an inference workload: the model, container image, runtime, and default
