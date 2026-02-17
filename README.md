@@ -478,6 +478,9 @@ the local copy without re-downloading.
 | `sparkrun cluster unset-default`      | Remove the default cluster setting                  |
 | `sparkrun cluster default`            | Show the current default cluster                    |
 
+The first host in a cluster definition is used as the **head node** for multi-node jobs. Order the remaining
+hosts however you like — they become workers.
+
 ### Setup commands
 
 | Command                     | Description                                    |
