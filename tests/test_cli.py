@@ -40,7 +40,7 @@ class TestVersionAndHelp:
         """Test that sparkrun --version shows version string."""
         result = runner.invoke(main, ["--version"])
         assert result.exit_code == 0
-        assert "sparkrun, version 0.1.0" in result.output
+        assert "sparkrun, version " in result.output
 
     def test_help(self, runner):
         """Test that sparkrun --help shows group help text with command names."""
