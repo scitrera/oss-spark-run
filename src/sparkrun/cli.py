@@ -632,19 +632,19 @@ def _detect_shell():
               help="Shell type (auto-detected if not specified)")
 @click.pass_context
 def setup_install(ctx, shell):
-    """Install sparkrun alias and tab-completion into your shell.
+    """Install sparkrun and tab-completion.
 
-    Intended for use with uvx:
+    Requires uv (https://docs.astral.sh/uv/).  Typical usage:
 
+    \b
       uvx sparkrun setup install
 
-    This adds a shell alias so that 'sparkrun' invokes 'uvx sparkrun',
-    then configures tab-completion. After restarting your shell (or
-    sourcing the rc file), sparkrun is ready to use.
-
-    If sparkrun was installed via pip, the alias is harmless — the
-    direct command on PATH takes the same precedence.
+    This installs sparkrun as a uv tool (real binary on PATH), cleans up
+    any old aliases/functions from previous installs, and configures
+    tab-completion.
     """
+    import shutil
+    import subprocess
     from pathlib import Path
 
     if not shell:
@@ -661,33 +661,38 @@ def setup_install(ctx, shell):
             click.echo("Error: Unsupported shell: %s" % shell, err=True)
             sys.exit(1)
 
-    # Step 1: Add sparkrun function
-    # We use a shell function (not an alias) because aliases are not
-    # expanded in $() subshells or by completion handlers.  A function
-    # is available everywhere the completion machinery needs it.
-    if shell == "fish":
-        func_marker = "function sparkrun"
-        func_block = "function sparkrun\n    uvx sparkrun $argv\nend"
-    else:
-        func_marker = "sparkrun()"
-        func_block = 'sparkrun() { uvx sparkrun "$@"; }'
+    # Step 1: Install sparkrun via uv tool
+    # noinspection PyDeprecation
+    uv = shutil.which("uv")
+    if not uv:
+        click.echo("Error: uv is required but not found on PATH.", err=True)
+        click.echo("Install uv first: pip install uv", err=True)
+        sys.exit(1)
 
-    func_installed = False
+    click.echo("Installing sparkrun via uv tool install...")
+    result = subprocess.run(
+        [uv, "tool", "install", "sparkrun", "--force"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        click.echo("Error installing sparkrun: %s" % result.stderr.strip(), err=True)
+        sys.exit(1)
+    click.echo("sparkrun installed on PATH")
+
+    # Step 2: Clean up old aliases/functions from previous installs
     if rc_file.exists():
+        old_markers = [
+            "alias sparkrun=", "alias sparkrun ",
+            "function sparkrun", "sparkrun()",
+        ]
         contents = rc_file.read_text()
-        # Also detect old-style aliases to avoid duplicate entries
-        if func_marker in contents or "alias sparkrun=" in contents or "alias sparkrun " in contents:
-            click.echo("sparkrun already configured in %s" % rc_file)
-            func_installed = True
+        lines = contents.splitlines(keepends=True)
+        cleaned = [ln for ln in lines if not any(m in ln for m in old_markers)]
+        if len(cleaned) != len(lines):
+            rc_file.write_text("".join(cleaned))
+            click.echo("Removed old sparkrun alias/function from %s" % rc_file)
 
-    if not func_installed:
-        rc_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(rc_file, "a") as f:
-            f.write("\n# sparkrun (via uvx)\n")
-            f.write(func_block + "\n")
-        click.echo("Alias installed in %s" % rc_file)
-
-    # Step 2: Set up tab-completion
+    # Step 3: Set up tab-completion
     ctx.invoke(setup_completion, shell=shell)
 
     click.echo()
