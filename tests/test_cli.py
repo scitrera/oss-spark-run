@@ -693,6 +693,127 @@ class TestFollowLogs:
             mock_follow.assert_not_called()
 
 
+class TestSetupSshCommand:
+    """Test the setup ssh command."""
+
+    @pytest.fixture
+    def cluster_setup(self, tmp_path, monkeypatch):
+        """Set up a config root with a test cluster for SSH tests."""
+        config_root = tmp_path / "config"
+        config_root.mkdir()
+        import sparkrun.config
+        monkeypatch.setattr(sparkrun.config, "DEFAULT_CONFIG_DIR", config_root)
+        from sparkrun.cluster_manager import ClusterManager
+        mgr = ClusterManager(config_root)
+        mgr.create("ssh-cluster", ["10.0.0.1", "10.0.0.2", "10.0.0.3"])
+        return config_root
+
+    def test_setup_ssh_help(self, runner):
+        """Test that sparkrun setup ssh --help shows relevant options."""
+        result = runner.invoke(main, ["setup", "ssh", "--help"])
+        assert result.exit_code == 0
+        assert "--hosts" in result.output
+        assert "--cluster" in result.output
+        assert "--user" in result.output
+        assert "--dry-run" in result.output
+        assert "SSH mesh" in result.output
+
+    def test_setup_ssh_requires_hosts(self, runner, tmp_path, monkeypatch):
+        """Test that setup ssh with no hosts exits with error."""
+        config_root = tmp_path / "config"
+        config_root.mkdir()
+        import sparkrun.config
+        monkeypatch.setattr(sparkrun.config, "DEFAULT_CONFIG_DIR", config_root)
+
+        result = runner.invoke(main, ["setup", "ssh"])
+        assert result.exit_code != 0
+        assert "No hosts" in result.output
+
+    def test_setup_ssh_requires_two_hosts(self, runner, tmp_path, monkeypatch):
+        """Test that setup ssh with a single host exits with error."""
+        config_root = tmp_path / "config"
+        config_root.mkdir()
+        import sparkrun.config
+        monkeypatch.setattr(sparkrun.config, "DEFAULT_CONFIG_DIR", config_root)
+
+        result = runner.invoke(main, ["setup", "ssh", "--hosts", "10.0.0.1"])
+        assert result.exit_code != 0
+        assert "at least 2 hosts" in result.output
+
+    def test_setup_ssh_dry_run(self, runner, tmp_path, monkeypatch):
+        """Test that --dry-run shows the command without executing."""
+        config_root = tmp_path / "config"
+        config_root.mkdir()
+        import sparkrun.config
+        monkeypatch.setattr(sparkrun.config, "DEFAULT_CONFIG_DIR", config_root)
+
+        result = runner.invoke(main, [
+            "setup", "ssh",
+            "--hosts", "10.0.0.1,10.0.0.2",
+            "--user", "testuser",
+            "--dry-run",
+        ])
+        assert result.exit_code == 0
+        assert "Would run:" in result.output
+        assert "mesh_ssh_keys.sh" in result.output
+        assert "testuser" in result.output
+        assert "10.0.0.1" in result.output
+        assert "10.0.0.2" in result.output
+
+    def test_setup_ssh_dry_run_default_user(self, runner, tmp_path, monkeypatch):
+        """Test that --dry-run uses OS user when --user is not specified."""
+        config_root = tmp_path / "config"
+        config_root.mkdir()
+        import sparkrun.config
+        monkeypatch.setattr(sparkrun.config, "DEFAULT_CONFIG_DIR", config_root)
+        monkeypatch.setenv("USER", "myosuser")
+
+        result = runner.invoke(main, [
+            "setup", "ssh",
+            "--hosts", "10.0.0.1,10.0.0.2",
+            "--dry-run",
+        ])
+        assert result.exit_code == 0
+        assert "myosuser" in result.output
+
+    def test_setup_ssh_resolves_cluster(self, runner, cluster_setup):
+        """Test that --cluster resolves hosts from a saved cluster."""
+        result = runner.invoke(main, [
+            "setup", "ssh",
+            "--cluster", "ssh-cluster",
+            "--user", "ubuntu",
+            "--dry-run",
+        ])
+        assert result.exit_code == 0
+        assert "Would run:" in result.output
+        assert "ubuntu" in result.output
+        assert "10.0.0.1" in result.output
+        assert "10.0.0.2" in result.output
+        assert "10.0.0.3" in result.output
+
+    def test_setup_ssh_runs_script(self, runner, tmp_path, monkeypatch):
+        """Test that setup ssh invokes subprocess.run with correct args."""
+        config_root = tmp_path / "config"
+        config_root.mkdir()
+        import sparkrun.config
+        monkeypatch.setattr(sparkrun.config, "DEFAULT_CONFIG_DIR", config_root)
+
+        with mock.patch("subprocess.run", return_value=mock.Mock(returncode=0)) as mock_run:
+            result = runner.invoke(main, [
+                "setup", "ssh",
+                "--hosts", "10.0.0.1,10.0.0.2",
+                "--user", "testuser",
+            ])
+
+            assert result.exit_code == 0
+            mock_run.assert_called_once()
+            cmd = mock_run.call_args[0][0]
+            assert cmd[0] == "bash"
+            assert "mesh_ssh_keys.sh" in cmd[1]
+            assert cmd[2] == "testuser"
+            assert cmd[3:] == ["10.0.0.1", "10.0.0.2"]
+
+
 class TestLogCommand:
     """Test the logs command."""
 

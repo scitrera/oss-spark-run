@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Mesh passwordless SSH among N hosts for the same username.
+# Creates per-host ed25519 key if missing, then appends each host's pubkey
+# into all other hosts' authorized_keys (deduped).
+#
+# Usage:
+#   ./mesh-ssh-keys.sh <username> <host1> <host2> <host3> <host4> [more hosts...]
+#
+# Example:
+#   ./mesh-ssh-keys.sh ubuntu node1 node2 node3 node4
+#
+# Notes:
+# - You will be prompted for passwords as needed (no sshpass/expect required).
+# TODO: add support for giving key file reference instead of passwords.
+# - Requires: bash, ssh, ssh-keygen (standard on Ubuntu w/ OpenSSH client)
+# - Assumes the same username exists on all hosts.
+
+if [[ $# -lt 3 ]]; then
+  echo "Usage: $0 <username> <host1> <host2> <host3> [more hosts...]"
+  exit 1
+fi
+
+USER_NAME="$1"
+shift
+HOSTS=("$@")
+
+SSH_OPTS=(
+  -o StrictHostKeyChecking=accept-new
+  -o UserKnownHostsFile="$HOME/.ssh/known_hosts"
+  -o ServerAliveInterval=10
+  -o ServerAliveCountMax=3
+)
+
+# SSH connection multiplexing to avoid repeated password prompts per host
+CONTROL_DIR="${TMPDIR:-/tmp}/mesh-ssh-keys-$USER_NAME"
+mkdir -p "$CONTROL_DIR"
+chmod 700 "$CONTROL_DIR"
+
+control_path_for() {
+  local host="$1"
+  # ControlPath must be short; %h and %p expansions help.
+  echo "$CONTROL_DIR/cm-%r@%h:%p"
+}
+
+ssh_cmd() {
+  local host="$1"
+  shift
+  local cp
+  cp="$(control_path_for "$host")"
+
+  ssh "${SSH_OPTS[@]}" \
+    -o ControlMaster=auto \
+    -o ControlPersist=10m \
+    -o ControlPath="$cp" \
+    "$USER_NAME@$host" "$@"
+}
+
+ssh_stdin_cmd() {
+  local host="$1"
+  shift
+  local cp
+  cp="$(control_path_for "$host")"
+
+  ssh "${SSH_OPTS[@]}" \
+    -o ControlMaster=auto \
+    -o ControlPersist=10m \
+    -o ControlPath="$cp" \
+    "$USER_NAME@$host" "$@"
+}
+
+echo "=== Phase 1: Connectivity check ==="
+for h in "${HOSTS[@]}"; do
+  echo "[*] Checking SSH connectivity to $USER_NAME@$h ..."
+  ssh_cmd "$h" "true"
+done
+echo
+
+echo "=== Phase 2: Ensure SSH key exists on each host ==="
+for h in "${HOSTS[@]}"; do
+  echo "[*] Ensuring ~/.ssh and id_ed25519 exist on $h ..."
+  ssh_cmd "$h" "set -euo pipefail
+    mkdir -p ~/.ssh
+    chmod 700 ~/.ssh
+    if [[ ! -f ~/.ssh/id_ed25519 ]]; then
+      ssh-keygen -t ed25519 -N '' -f ~/.ssh/id_ed25519 >/dev/null
+    fi
+    chmod 600 ~/.ssh/id_ed25519
+    chmod 644 ~/.ssh/id_ed25519.pub
+  "
+done
+echo
+
+echo "=== Phase 3: Fetch each host's public key ==="
+declare -A PUBKEY
+for h in "${HOSTS[@]}"; do
+  echo "[*] Reading public key from $h ..."
+  PUBKEY["$h"]="$(ssh_cmd "$h" "cat ~/.ssh/id_ed25519.pub")"
+  if [[ -z "${PUBKEY[$h]}" ]]; then
+    echo "[!] Failed to read pubkey from $h"
+    exit 1
+  fi
+done
+echo
+
+echo "=== Phase 4: Install keys so every host trusts every other host ==="
+for src in "${HOSTS[@]}"; do
+  key="${PUBKEY[$src]}"
+  echo "[*] Installing key from $src onto all other hosts ..."
+  for dst in "${HOSTS[@]}"; do
+    if [[ "$src" == "$dst" ]]; then
+      continue
+    fi
+
+    echo "    - $src -> $dst"
+    # Send the key over stdin and append only if not already present.
+    printf '%s\n' "$key" | ssh_stdin_cmd "$dst" "set -euo pipefail
+      umask 077
+      mkdir -p ~/.ssh
+      chmod 700 ~/.ssh
+      touch ~/.ssh/authorized_keys
+      chmod 600 ~/.ssh/authorized_keys
+
+      read -r incoming_key
+      # Deduplicate: add only if exact line not present.
+      grep -qxF \"\$incoming_key\" ~/.ssh/authorized_keys || echo \"\$incoming_key\" >> ~/.ssh/authorized_keys
+    "
+  done
+done
+echo
+
+echo "=== Done ==="
+echo "All hosts should now be able to SSH to each other as '$USER_NAME' without passwords."
+echo
+echo "Quick test examples (run from any host):"
+echo "  ssh $USER_NAME@${HOSTS[0]}"
+echo "  ssh $USER_NAME@${HOSTS[1]}"
+

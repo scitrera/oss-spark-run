@@ -19,3 +19,17 @@ def read_script(name: str) -> str:
         Script content as a string.
     """
     return resources.files(__package__).joinpath(name).read_text(encoding="utf-8")
+
+
+def get_script_path(name: str):
+    """Return a context manager that yields a filesystem :class:`~pathlib.Path` for a script.
+
+    Usage::
+
+        with get_script_path("mesh_ssh_keys.sh") as path:
+            subprocess.run(["bash", str(path), ...])
+
+    The context manager guarantees the path exists on disk even when the
+    package is installed inside a zip archive.
+    """
+    return resources.as_file(resources.files(__package__).joinpath(name))

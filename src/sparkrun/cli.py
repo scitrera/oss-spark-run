@@ -754,6 +754,81 @@ def setup_update(ctx):
     click.echo("sparkrun updated to %s" % __version__)
 
 
+@setup.command("ssh")
+@click.option("--hosts", "-H", default=None, help="Comma-separated host list")
+@click.option("--hosts-file", default=None, help="File with hosts (one per line, # comments)")
+@click.option("--cluster", "cluster_name", default=None, type=CLUSTER_NAME,
+              help="Use a saved cluster by name")
+@click.option("--user", "-u", default=None, help="SSH username (default: current user)")
+@click.option("--dry-run", "-n", is_flag=True, help="Show what would be done")
+@click.pass_context
+def setup_ssh(ctx, hosts, hosts_file, cluster_name, user, dry_run):
+    """Set up passwordless SSH mesh across cluster hosts.
+
+    Ensures every host can SSH to every other host without password prompts.
+    Creates ed25519 keys if missing and distributes public keys.
+
+    You will be prompted for passwords on first connection to each host.
+
+    Examples:
+
+      sparkrun setup ssh --hosts 192.168.11.13,192.168.11.14
+
+      sparkrun setup ssh --cluster mylab --user ubuntu
+    """
+    import os
+    import subprocess
+
+    from sparkrun.hosts import resolve_hosts
+    from sparkrun.cluster_manager import ClusterManager
+    from sparkrun.config import SparkrunConfig, get_config_root
+
+    config = SparkrunConfig()
+
+    # Resolve hosts
+    cluster_mgr = ClusterManager(get_config_root())
+    host_list = resolve_hosts(
+        hosts=hosts,
+        hosts_file=hosts_file,
+        cluster_name=cluster_name,
+        cluster_manager=cluster_mgr,
+        config_default_hosts=config.default_hosts,
+    )
+
+    if not host_list:
+        click.echo("Error: No hosts specified. Use --hosts, --hosts-file, or --cluster.", err=True)
+        sys.exit(1)
+
+    if len(host_list) < 2:
+        click.echo(
+            "Error: SSH mesh requires at least 2 hosts (got %d)." % len(host_list),
+            err=True,
+        )
+        sys.exit(1)
+
+    # Default user: --user flag > config ssh.user > OS user
+    if user is None:
+        user = config.ssh_user or os.environ.get("USER", "root")
+
+    # Locate the bundled script
+    from sparkrun.scripts import get_script_path
+    with get_script_path("mesh_ssh_keys.sh") as script_path:
+        cmd = ["bash", str(script_path), user] + host_list
+
+        if dry_run:
+            click.echo("Would run:")
+            click.echo("  " + " ".join(cmd))
+            return
+
+        click.echo("Setting up SSH mesh for user '%s' across %d hosts..." % (user, len(host_list)))
+        click.echo("Hosts: %s" % ", ".join(host_list))
+        click.echo()
+
+        # Run interactively — the script prompts for passwords
+        result = subprocess.run(cmd)
+        sys.exit(result.returncode)
+
+
 @main.command()
 @click.argument("recipe_name", type=RECIPE_NAME)
 @click.option("--hosts", "-H", default=None, help="Comma-separated host list")

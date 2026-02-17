@@ -225,6 +225,21 @@ All multi-node orchestration relies on SSH. Before using sparkrun with remote ho
 access from your control machine to every node in the cluster, and between nodes for container image and model
 distribution.
 
+The easiest way to set this up is with `sparkrun setup ssh`, which creates a full SSH mesh across all hosts:
+
+```bash
+# Set up passwordless SSH mesh across your cluster
+sparkrun setup ssh --hosts 192.168.11.13,192.168.11.14 --user ubuntu
+
+# Or use a saved cluster
+sparkrun setup ssh --cluster mylab
+```
+
+You will be prompted for passwords on first connection to each host. After that, all hosts can SSH to each
+other without passwords.
+
+Alternatively, you can set up SSH manually:
+
 ```bash
 # Verify you can reach each host without a password prompt
 ssh 192.168.11.13 hostname
@@ -428,6 +443,7 @@ the local copy without re-downloading.
 | `sparkrun setup install`                      | Install sparkrun as a uv tool + tab-completion |
 | `sparkrun setup completion`                   | Install shell tab-completion (bash/zsh/fish) |
 | `sparkrun setup update`                       | Update sparkrun to the latest version    |
+| `sparkrun setup ssh`                          | Set up passwordless SSH mesh across hosts |
 
 ## Roadmap
 
