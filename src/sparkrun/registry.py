@@ -500,8 +500,7 @@ class RegistryManager:
                 if recipe_dir is None:
                     continue
                 for ext in (".yaml", ".yml"):
-                    for candidate in sorted(recipe_dir.rglob("*" + ext)):
-                        if candidate.stem == name:
-                            matches.append((entry.name, candidate))
+                    for candidate in sorted(recipe_dir.rglob(f"{name}{ext}")):
+                        matches.append((entry.name, candidate))
 
         return matches
