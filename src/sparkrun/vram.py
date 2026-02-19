@@ -27,6 +27,7 @@ _DTYPE_BYTES: dict[str, float] = {
     "gptq": 0.5,
     "mxfp4": 0.5,
     # TODO: GGUF quants
+    'q3_k_m': 0.4,
     'q4_k_m': 0.5,
     'q8_0': 1.0,
 }
@@ -113,8 +114,8 @@ def parse_param_count(value: int | float | str) -> int | None:
 
 
 def fetch_model_config(
-    model_id: str,
-    revision: str | None = None,
+        model_id: str,
+        revision: str | None = None,
 ) -> dict[str, Any] | None:
     """Fetch model config.json from HuggingFace Hub without downloading weights.
 
