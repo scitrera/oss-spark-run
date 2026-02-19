@@ -106,7 +106,7 @@ def remove_pending_op(
     try:
         path.unlink(missing_ok=True)
     except OSError:
-        pass
+        logger.debug("Could not remove pending-op lock: %s", path)
 
 
 @contextmanager

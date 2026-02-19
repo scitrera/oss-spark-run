@@ -20,6 +20,15 @@ DEFAULT_CACHE_DIR = Path.home() / ".cache" / "sparkrun"
 DEFAULT_HF_CACHE_DIR = Path.home() / ".cache" / "huggingface"
 
 
+def resolve_cache_dir(cache_dir: str | None) -> str:
+    """Resolve an optional cache directory override to a concrete path.
+
+    Returns *cache_dir* if provided, otherwise the default HuggingFace
+    cache directory.
+    """
+    return cache_dir or str(DEFAULT_HF_CACHE_DIR)
+
+
 def get_config_root(v: Variables | None = None) -> Path:
     """Config root from SAF stateful root, falling back to DEFAULT_CONFIG_DIR."""
     if v is not None:

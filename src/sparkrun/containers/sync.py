@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from sparkrun.orchestration.ssh import run_remote_scripts_parallel
+from sparkrun.orchestration.primitives import sync_resource_to_hosts
 from sparkrun.scripts import read_script
 
 logger = logging.getLogger(__name__)
@@ -33,18 +33,7 @@ def sync_image_to_hosts(
     """
     script = read_script("image_sync.sh").format(image=image)
 
-    results = run_remote_scripts_parallel(
-        hosts,
-        script,
-        ssh_user=ssh_user,
-        ssh_key=ssh_key,
-        dry_run=dry_run,
+    return sync_resource_to_hosts(
+        script, hosts, "Image",
+        ssh_user=ssh_user, ssh_key=ssh_key, dry_run=dry_run,
     )
-
-    failed = [r.host for r in results if not r.success]
-    if failed:
-        logger.warning("Image sync failed on hosts: %s", failed)
-    else:
-        logger.info("Image available on all %d hosts", len(hosts))
-
-    return failed

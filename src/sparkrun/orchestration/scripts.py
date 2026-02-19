@@ -11,8 +11,8 @@ import logging
 from sparkrun.orchestration.docker import (
     docker_run_cmd,
     docker_stop_cmd,
-    generate_container_name,
 )
+from sparkrun.orchestration.primitives import merge_env
 from sparkrun.scripts import read_script
 
 logger = logging.getLogger(__name__)
@@ -55,11 +55,7 @@ def generate_container_launch_script(
     Returns:
         Complete bash script as a string.
     """
-    all_env: dict[str, str] = {}
-    if nccl_env:
-        all_env.update(nccl_env)
-    if env:
-        all_env.update(env)
+    all_env = merge_env(nccl_env, env)
 
     cleanup = docker_stop_cmd(container_name)
     run_cmd = docker_run_cmd(
@@ -112,11 +108,7 @@ def generate_ray_head_script(
     Returns:
         Complete bash script as a string.
     """
-    all_env: dict[str, str] = {"RAY_memory_monitor_refresh_ms": "0"}
-    if nccl_env:
-        all_env.update(nccl_env)
-    if env:
-        all_env.update(env)
+    all_env = merge_env({"RAY_memory_monitor_refresh_ms": "0"}, nccl_env, env)
 
     dashboard_flags = ""
     if dashboard:
@@ -176,11 +168,7 @@ def generate_ray_worker_script(
     Returns:
         Complete bash script as a string.
     """
-    all_env: dict[str, str] = {"RAY_memory_monitor_refresh_ms": "0"}
-    if nccl_env:
-        all_env.update(nccl_env)
-    if env:
-        all_env.update(env)
+    all_env = merge_env({"RAY_memory_monitor_refresh_ms": "0"}, nccl_env, env)
 
     cleanup = docker_stop_cmd(container_name)
     run_cmd = docker_run_cmd(

@@ -60,12 +60,6 @@ class LlamaCppRuntime(RuntimePlugin):
     runtime_name = "llama-cpp"
     default_image_prefix = "scitrera/dgx-spark-llama-cpp"
 
-    def resolve_container(self, recipe: Recipe, overrides: dict[str, Any] | None = None) -> str:
-        """Resolve the container image to use for llama.cpp."""
-        if recipe.container:
-            return recipe.container
-        return "%s:latest" % self.default_image_prefix
-
     def cluster_strategy(self) -> str:
         """llama.cpp uses native RPC-based distribution, not Ray."""
         return "native"
@@ -150,45 +144,25 @@ class LlamaCppRuntime(RuntimePlugin):
 
     # --- Log following ---
 
-    def follow_logs(
+    def _follow_cluster_logs(
             self,
             hosts: list[str],
-            cluster_id: str = "sparkrun0",
+            cluster_id: str,
             config=None,
             dry_run: bool = False,
             tail: int = 100,
     ) -> None:
-        """Follow serve logs for a llama.cpp container.
+        """Follow logs for a llama.cpp RPC cluster.
 
-        Solo mode uses ``stream_container_file_logs`` (sleep infinity +
-        exec pattern writes to ``/tmp/sparkrun_serve.log``).
-
-        Cluster mode uses ``stream_remote_logs`` (docker logs) on the
-        head container since the serve command runs as the container
-        entrypoint.
+        Cluster mode runs the serve command as the container entrypoint,
+        so ``docker logs`` is the correct approach.
         """
         from sparkrun.orchestration.primitives import build_ssh_kwargs
-
-        if len(hosts) <= 1:
-            from sparkrun.orchestration.docker import generate_container_name
-            from sparkrun.orchestration.ssh import stream_container_file_logs
-
-            host = hosts[0] if hosts else "localhost"
-            container_name = generate_container_name(cluster_id, "solo")
-            ssh_kwargs = build_ssh_kwargs(config)
-
-            stream_container_file_logs(
-                host, container_name, tail=tail, dry_run=dry_run, **ssh_kwargs,
-            )
-            return
-
-        # Cluster mode: head runs as container entrypoint -> docker logs
         from sparkrun.orchestration.ssh import stream_remote_logs
 
         head_host = hosts[0]
         container_name = self._container_name(cluster_id, "head")
         ssh_kwargs = build_ssh_kwargs(config)
-
         stream_remote_logs(
             head_host, container_name, tail=tail, dry_run=dry_run, **ssh_kwargs,
         )
@@ -396,8 +370,8 @@ class LlamaCppRuntime(RuntimePlugin):
                 for host in worker_hosts:
                     script = self._generate_node_script(
                         image=image, container_name=worker_container_name,
-                        serve_command=rpc_worker_command, env=all_env,
-                        volumes=volumes, nccl_env=nccl_env,
+                        serve_command=rpc_worker_command, label="llama.cpp node",
+                        env=all_env, volumes=volumes, nccl_env=nccl_env,
                     )
                     future = executor.submit(
                         run_remote_script, host, script,
@@ -452,8 +426,8 @@ class LlamaCppRuntime(RuntimePlugin):
 
         head_script = self._generate_node_script(
             image=image, container_name=head_container,
-            serve_command=head_command, env=all_env,
-            volumes=volumes, nccl_env=nccl_env,
+            serve_command=head_command, label="llama.cpp node",
+            env=all_env, volumes=volumes, nccl_env=nccl_env,
         )
         head_result = run_remote_script(
             head_host, head_script, timeout=120, dry_run=dry_run, **ssh_kwargs,
@@ -466,55 +440,6 @@ class LlamaCppRuntime(RuntimePlugin):
         self._print_rpc_connection_info(hosts, cluster_id, head_host, rpc_port)
         return 0
 
-    @staticmethod
-    def _generate_node_script(
-            image: str,
-            container_name: str,
-            serve_command: str,
-            env: dict[str, str] | None = None,
-            volumes: dict[str, str] | None = None,
-            nccl_env: dict[str, str] | None = None,
-    ) -> str:
-        """Generate a script that launches a llama.cpp node directly.
-
-        The serve command runs as the container entrypoint (not sleep
-        infinity + exec).  Used for both RPC workers and the head node
-        in cluster mode.
-        """
-        from sparkrun.orchestration.docker import docker_run_cmd, docker_stop_cmd
-        from sparkrun.orchestration.primitives import merge_env
-
-        all_env = merge_env(nccl_env, env)
-        cleanup = docker_stop_cmd(container_name)
-        run_cmd = docker_run_cmd(
-            image=image,
-            command=serve_command,
-            container_name=container_name,
-            detach=True,
-            env=all_env,
-            volumes=volumes,
-        )
-
-        return (
-            "#!/bin/bash\n"
-            "set -uo pipefail\n"
-            "\n"
-            "echo 'Cleaning up existing container: %(name)s'\n"
-            "%(cleanup)s\n"
-            "\n"
-            "echo 'Launching llama.cpp node: %(name)s'\n"
-            "%(run_cmd)s\n"
-            "\n"
-            "# Verify container started\n"
-            "sleep 1\n"
-            "if docker ps --format '{{.Names}}' | grep -q '^%(name)s$'; then\n"
-            "    echo 'Container %(name)s launched successfully'\n"
-            "else\n"
-            "    echo 'ERROR: Container %(name)s failed to start' >&2\n"
-            "    docker logs %(name)s 2>&1 | tail -20 || true\n"
-            "    exit 1\n"
-            "fi\n"
-        ) % {"name": container_name, "cleanup": cleanup, "run_cmd": run_cmd}
 
     def _print_rpc_banner(self, hosts, image, cluster_id, rpc_port, dry_run):
         mode = "DRY-RUN" if dry_run else "LIVE"

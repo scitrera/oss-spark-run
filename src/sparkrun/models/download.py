@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from sparkrun.config import DEFAULT_HF_CACHE_DIR
+from sparkrun.config import resolve_cache_dir
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +34,7 @@ def _hub_cache(cache_dir: str | None = None) -> str:
     to ``/root/.cache/huggingface`` inside containers, so the ``hub/``
     subdirectory is preserved on both sides.
     """
-    base = cache_dir or str(DEFAULT_HF_CACHE_DIR)
+    base = resolve_cache_dir(cache_dir)
     return base + "/hub"
 
 
@@ -98,7 +98,7 @@ def resolve_gguf_path(
         Path to the ``.gguf`` file, or ``None`` if not found.
     """
     repo_id, quant = parse_gguf_model_spec(model_id)
-    cache = Path(cache_dir or str(DEFAULT_HF_CACHE_DIR))
+    cache = Path(resolve_cache_dir(cache_dir))
     safe_name = repo_id.replace("/", "--")
     model_cache = cache / "hub" / ("models--" + safe_name)
 
@@ -149,7 +149,7 @@ def resolve_gguf_container_path(
     if not host_path:
         return None
 
-    cache = cache_dir or str(DEFAULT_HF_CACHE_DIR)
+    cache = resolve_cache_dir(cache_dir)
     # Replace host cache prefix with container mount path
     if host_path.startswith(cache):
         return container_cache + host_path[len(cache):]
@@ -223,7 +223,7 @@ def is_model_cached(
     if is_gguf_model(model_id):
         return resolve_gguf_path(model_id, cache_dir) is not None
 
-    cache = Path(cache_dir or str(DEFAULT_HF_CACHE_DIR))
+    cache = Path(resolve_cache_dir(cache_dir))
     # HF cache structure: hub/models--org--name/snapshots/<hash>/
     safe_name = model_id.replace("/", "--")
     model_cache = cache / "hub" / f"models--{safe_name}"
@@ -287,7 +287,7 @@ def download_model(
             revision=revision, dry_run=dry_run,
         )
 
-    cache = cache_dir or str(DEFAULT_HF_CACHE_DIR)
+    cache = resolve_cache_dir(cache_dir)
 
     if dry_run:
         logger.info("[dry-run] Would download model: %s (revision=%s) to %s",
@@ -342,7 +342,7 @@ def _download_gguf(
         Exit code (0 = success).
     """
     repo_id, quant = parse_gguf_model_spec(model_id)
-    cache = cache_dir or str(DEFAULT_HF_CACHE_DIR)
+    cache = resolve_cache_dir(cache_dir)
 
     if dry_run:
         logger.info("[dry-run] Would download GGUF model: %s (quant=%s, revision=%s) to %s",

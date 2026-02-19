@@ -317,7 +317,7 @@ def query_cluster_status(
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
     from sparkrun.orchestration.ssh import run_remote_command
-    from sparkrun.orchestration.docker import load_job_metadata
+    from sparkrun.orchestration.job_metadata import load_job_metadata
     from sparkrun.pending_ops import list_pending_ops
 
     docker_cmd = (

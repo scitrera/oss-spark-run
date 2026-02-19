@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import logging
 
-from sparkrun.config import DEFAULT_HF_CACHE_DIR
-from sparkrun.orchestration.ssh import run_remote_scripts_parallel
+from sparkrun.config import resolve_cache_dir
+from sparkrun.orchestration.primitives import sync_resource_to_hosts
 from sparkrun.scripts import read_script
 
 logger = logging.getLogger(__name__)
@@ -37,25 +37,14 @@ def sync_model_to_hosts(
     Returns:
         List of hostnames where the sync failed.
     """
-    cache = cache_dir or str(DEFAULT_HF_CACHE_DIR)
+    cache = resolve_cache_dir(cache_dir)
     revision_flag = "--revision %s " % revision if revision else ""
 
     script = read_script("model_sync.sh").format(
         model_id=model_id, cache=cache, revision_flag=revision_flag,
     )
 
-    results = run_remote_scripts_parallel(
-        hosts,
-        script,
-        ssh_user=ssh_user,
-        ssh_key=ssh_key,
-        dry_run=dry_run,
+    return sync_resource_to_hosts(
+        script, hosts, "Model",
+        ssh_user=ssh_user, ssh_key=ssh_key, dry_run=dry_run,
     )
-
-    failed = [r.host for r in results if not r.success]
-    if failed:
-        logger.warning("Model sync failed on hosts: %s", failed)
-    else:
-        logger.info("Model synced to all %d hosts", len(hosts))
-
-    return failed

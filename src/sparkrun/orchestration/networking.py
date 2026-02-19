@@ -10,6 +10,7 @@ import ipaddress
 import logging
 from dataclasses import dataclass, field
 
+from sparkrun.orchestration.infiniband import parse_kv_output
 from sparkrun.scripts import read_script
 
 logger = logging.getLogger(__name__)
@@ -101,17 +102,8 @@ def generate_cx7_detect_script() -> str:
 
 
 def parse_cx7_detect_output(output: str) -> dict[str, str]:
-    """Parse key=value stdout from the CX7 detection script.
-
-    Same pattern as ``parse_ib_detect_output``.
-    """
-    result: dict[str, str] = {}
-    for line in output.strip().splitlines():
-        line = line.strip()
-        if "=" in line and not line.startswith("#"):
-            key, _, value = line.partition("=")
-            result[key.strip()] = value.strip()
-    return result
+    """Parse key=value stdout from the CX7 detection script."""
+    return parse_kv_output(output)
 
 
 def build_host_detection(host: str, raw: dict[str, str]) -> CX7HostDetection:

@@ -62,6 +62,28 @@ def generate_ib_detect_script() -> str:
     return read_script("ib_detect.sh")
 
 
+# TODO: move to utility lib
+def parse_kv_output(output: str) -> dict[str, str]:
+    """Parse key=value lines from script output.
+
+    Lines starting with ``#`` are ignored. Leading/trailing whitespace
+    on keys and values is stripped.
+
+    Args:
+        output: Raw stdout containing key=value lines.
+
+    Returns:
+        Dictionary of parsed key=value pairs.
+    """
+    result: dict[str, str] = {}
+    for line in output.strip().splitlines():
+        line = line.strip()
+        if "=" in line and not line.startswith("#"):
+            key, _, value = line.partition("=")
+            result[key.strip()] = value.strip()
+    return result
+
+
 def parse_ib_detect_output(output: str) -> dict[str, str]:
     """Parse the output of the IB detection script into a dict.
 
@@ -71,13 +93,7 @@ def parse_ib_detect_output(output: str) -> dict[str, str]:
     Returns:
         Dictionary of detected key=value pairs.
     """
-    result: dict[str, str] = {}
-    for line in output.strip().splitlines():
-        line = line.strip()
-        if "=" in line and not line.startswith("#"):
-            key, _, value = line.partition("=")
-            result[key.strip()] = value.strip()
-    return result
+    return parse_kv_output(output)
 
 
 def generate_nccl_env(ib_info: dict[str, str]) -> dict[str, str]:

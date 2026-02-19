@@ -28,7 +28,6 @@ class RuntimePlugin(Plugin):
     Subclasses must define:
         - runtime_name: str identifier (e.g. "vllm", "sglang")
         - generate_command(): produce the serve command from a recipe
-        - resolve_container(): determine which container image to use
     """
 
     eager = False  # don't initialize until requested
@@ -77,18 +76,17 @@ class RuntimePlugin(Plugin):
         """
         ...
 
-    @abstractmethod
     def resolve_container(self, recipe: Recipe, overrides: dict[str, Any] | None = None) -> str:
         """Resolve the container image to use.
 
-        Args:
-            recipe: The loaded recipe
-            overrides: Optional CLI overrides
+        Returns the recipe's explicit container if set, otherwise
+        falls back to ``{default_image_prefix}:latest``.
 
-        Returns:
-            Fully qualified container image reference
+        Subclasses may override for custom resolution logic.
         """
-        ...
+        if recipe.container:
+            return recipe.container
+        return "%s:latest" % self.default_image_prefix
 
     def get_cluster_env(self, head_ip: str, num_nodes: int) -> dict[str, str]:
         """Return runtime-specific environment variables for cluster mode.
@@ -208,27 +206,43 @@ class RuntimePlugin(Plugin):
     ) -> None:
         """Follow container logs after a successful launch.
 
-        The default implementation follows the solo container on the
-        first host.  Runtimes that use different container naming for
-        cluster mode should override this method.
+        Solo mode tails the serve log file inside the container
+        (``/tmp/sparkrun_serve.log``), which is the correct approach
+        for all runtimes using the sleep-infinity + exec pattern.
 
-        Args:
-            hosts: List of hostnames/IPs (first = head).
-            cluster_id: Cluster identifier used when launching.
-            config: SparkrunConfig instance for SSH settings.
-            dry_run: Show what would be done without executing.
-            tail: Number of existing log lines to show before following.
+        Cluster mode delegates to :meth:`_follow_cluster_logs`, which
+        subclasses should override.
         """
-        from sparkrun.orchestration.primitives import build_ssh_kwargs
-        from sparkrun.orchestration.docker import generate_container_name
-        from sparkrun.orchestration.ssh import stream_remote_logs
+        if len(hosts) <= 1:
+            from sparkrun.orchestration.primitives import build_ssh_kwargs
+            from sparkrun.orchestration.docker import generate_container_name
+            from sparkrun.orchestration.ssh import stream_container_file_logs
 
-        host = hosts[0] if hosts else "localhost"
-        container_name = generate_container_name(cluster_id, "solo")
-        ssh_kwargs = build_ssh_kwargs(config)
+            host = hosts[0] if hosts else "localhost"
+            container_name = generate_container_name(cluster_id, "solo")
+            ssh_kwargs = build_ssh_kwargs(config)
+            stream_container_file_logs(
+                host, container_name, tail=tail, dry_run=dry_run, **ssh_kwargs,
+            )
+            return
 
-        stream_remote_logs(
-            host, container_name, tail=tail, dry_run=dry_run, **ssh_kwargs,
+        self._follow_cluster_logs(hosts, cluster_id, config, dry_run, tail)
+
+    def _follow_cluster_logs(
+            self,
+            hosts: list[str],
+            cluster_id: str,
+            config: SparkrunConfig | None,
+            dry_run: bool,
+            tail: int,
+    ) -> None:
+        """Follow logs for a multi-node cluster.
+
+        Override in subclasses to provide runtime-specific cluster log tailing.
+        The default raises NotImplementedError.
+        """
+        raise NotImplementedError(
+            "%s does not implement cluster log following" % type(self).__name__
         )
 
     # --- Launch / Stop interface ---
@@ -464,6 +478,69 @@ class RuntimePlugin(Plugin):
 
         logger.info("Solo workload '%s' stopped on %s", cluster_id, host)
         return 0
+
+    @staticmethod
+    def _generate_node_script(
+            image: str,
+            container_name: str,
+            serve_command: str,
+            label: str = "node",
+            env: dict[str, str] | None = None,
+            volumes: dict[str, str] | None = None,
+            nccl_env: dict[str, str] | None = None,
+    ) -> str:
+        """Generate a script that launches a container with a direct entrypoint command.
+
+        Unlike the sleep-infinity + exec pattern used in solo mode, the
+        serve command runs as the container's entrypoint.  Used for native
+        and RPC cluster nodes where each container runs its own serve process.
+
+        Args:
+            image: Container image reference.
+            container_name: Name for the container.
+            serve_command: Command to run as the container entrypoint.
+            label: Human-readable label for log messages (e.g. "sglang node").
+            env: Additional environment variables.
+            volumes: Volume mounts (host_path -> container_path).
+            nccl_env: NCCL-specific environment variables.
+
+        Returns:
+            Complete bash script as a string.
+        """
+        from sparkrun.orchestration.docker import docker_run_cmd, docker_stop_cmd
+        from sparkrun.orchestration.primitives import merge_env
+
+        all_env = merge_env(nccl_env, env)
+        cleanup = docker_stop_cmd(container_name)
+        run_cmd = docker_run_cmd(
+            image=image,
+            command=serve_command,
+            container_name=container_name,
+            detach=True,
+            env=all_env,
+            volumes=volumes,
+        )
+
+        return (
+            "#!/bin/bash\n"
+            "set -uo pipefail\n"
+            "\n"
+            "echo 'Cleaning up existing container: %(name)s'\n"
+            "%(cleanup)s\n"
+            "\n"
+            "echo 'Launching %(label)s: %(name)s'\n"
+            "%(run_cmd)s\n"
+            "\n"
+            "# Verify container started\n"
+            "sleep 1\n"
+            "if docker ps --format '{{.Names}}' | grep -q '^%(name)s$'; then\n"
+            "    echo 'Container %(name)s launched successfully'\n"
+            "else\n"
+            "    echo 'ERROR: Container %(name)s failed to start' >&2\n"
+            "    docker logs %(name)s 2>&1 | tail -20 || true\n"
+            "    exit 1\n"
+            "fi\n"
+        ) % {"name": container_name, "cleanup": cleanup, "run_cmd": run_cmd, "label": label}
 
     def __repr__(self) -> str:
         return "%s(runtime_name=%r)" % (self.__class__.__name__, self.runtime_name)

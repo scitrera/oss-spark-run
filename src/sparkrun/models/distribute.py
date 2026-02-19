@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import logging
 
-from sparkrun.config import DEFAULT_HF_CACHE_DIR
+from sparkrun.config import resolve_cache_dir
 from sparkrun.models.download import download_model
+from sparkrun.orchestration.primitives import map_transfer_failures
 from sparkrun.orchestration.ssh import (
     build_ssh_opts_string,
     run_remote_script,
@@ -75,7 +76,7 @@ def distribute_model_from_local(
         List of hostnames (from *hosts*) where distribution failed
         (empty = full success).
     """
-    cache = cache_dir or str(DEFAULT_HF_CACHE_DIR)
+    cache = resolve_cache_dir(cache_dir)
     logger.info("Distributing model '%s' from local to %d host(s)", model_id, len(hosts))
 
     # Step 1: download model locally
@@ -98,8 +99,7 @@ def distribute_model_from_local(
     )
 
     # Map transfer IPs back to management hosts for failure reporting
-    xfer_to_host = dict(zip(xfer, hosts))
-    failed = [xfer_to_host.get(r.host, r.host) for r in results if not r.success]
+    failed = map_transfer_failures(results, xfer, hosts)
     if failed:
         logger.warning("Model distribution failed on hosts: %s", failed)
     else:
@@ -146,7 +146,7 @@ def distribute_model_from_head(
     if not hosts:
         return []
 
-    cache = cache_dir or str(DEFAULT_HF_CACHE_DIR)
+    cache = resolve_cache_dir(cache_dir)
     head = hosts[0]
     logger.info("Distributing model '%s' from head (%s) to %d host(s)",
                 model_id, head, len(hosts))

@@ -106,6 +106,29 @@ def _apply_tp_trimming(
     return trimmed
 
 
+def _resolve_cluster_user(
+        cluster_name: str | None,
+        hosts: str | None,
+        hosts_file: str | None,
+        cluster_mgr,
+) -> str | None:
+    """Resolve the SSH user from a cluster definition, if applicable.
+
+    Returns the cluster's configured user, or None if no cluster is
+    resolved or the cluster has no user set.
+    """
+    resolved = cluster_name
+    if not resolved and not hosts and not hosts_file:
+        resolved = cluster_mgr.get_default() if cluster_mgr else None
+    if resolved:
+        try:
+            cluster_def = cluster_mgr.get(resolved)
+            return cluster_def.user
+        except Exception:
+            logger.debug("Failed to resolve cluster '%s'", resolved, exc_info=True)
+    return None
+
+
 def _get_cluster_manager(v=None):
     """Create a ClusterManager using the SAF config root."""
     from sparkrun.cluster_manager import ClusterManager
@@ -219,6 +242,23 @@ class ClusterNameType(click.ParamType):
 CLUSTER_NAME = ClusterNameType()
 
 
+def host_options(f):
+    """Common host-targeting options: --hosts, --hosts-file, --cluster."""
+    f = click.option("--cluster", "cluster_name", default=None, type=CLUSTER_NAME,
+                      help="Use a saved cluster by name")(f)
+    f = click.option("--hosts-file", default=None,
+                      help="File with hosts (one per line, # comments)")(f)
+    f = click.option("--hosts", "-H", default=None,
+                      help="Comma-separated host list")(f)
+    return f
+
+
+def dry_run_option(f):
+    """Common --dry-run flag."""
+    return click.option("--dry-run", "-n", is_flag=True,
+                        help="Show what would be done")(f)
+
+
 class RegistryNameType(click.ParamType):
     """Click parameter type with shell completion for registry names."""
 
@@ -305,9 +345,7 @@ def main(ctx, verbose):
 
 @main.command()
 @click.argument("recipe_name", type=RECIPE_NAME)
-@click.option("--hosts", "-H", default=None, help="Comma-separated host list (first=head)")
-@click.option("--hosts-file", default=None, help="File with hosts (one per line, # comments)")
-@click.option("--cluster", "cluster_name", default=None, help="Use a saved cluster by name")
+@host_options
 @click.option("--solo", is_flag=True, help="Force single-node mode")
 @click.option("--port", type=int, default=None, help="Override serve port")
 @click.option("--tp", "--tensor-parallel", "tensor_parallel", type=int, default=None,
@@ -320,7 +358,7 @@ def main(ctx, verbose):
 @click.option("--dashboard", is_flag=True, help="Enable Ray dashboard on head node")
 @click.option("--dashboard-port", type=int, default=8265, help="Ray dashboard port")
 # @click.option("--setup", is_flag=True, hidden=True, help="Deprecated: distribution is now automatic")
-@click.option("--dry-run", "-n", is_flag=True, help="Show what would be done")
+@dry_run_option
 @click.option("--foreground", is_flag=True, help="Run in foreground (don't detach)")
 @click.option("--no-follow", is_flag=True, help="Don't follow container logs after launch")
 @click.option("--skip-ib", is_flag=True, help="Skip InfiniBand detection")
@@ -459,7 +497,7 @@ def run(
         host_list = host_list[:1]
 
     # Derive deterministic cluster_id from recipe + (trimmed) hosts
-    from sparkrun.orchestration.docker import generate_cluster_id, save_job_metadata
+    from sparkrun.orchestration.job_metadata import generate_cluster_id, save_job_metadata
     cluster_id = generate_cluster_id(recipe, host_list)
 
     # Cache job metadata for later lookup by cluster status
@@ -468,7 +506,7 @@ def run(
             save_job_metadata(cluster_id, recipe, host_list,
                               overrides=overrides, cache_dir=str(config.cache_dir))
         except Exception:
-            pass  # non-critical; don't block launch
+            logger.debug("Failed to save job metadata: %s", cluster_id, exc_info=True)
 
     # Resolve container image
     container_image = runtime.resolve_container(recipe, overrides)
@@ -496,7 +534,7 @@ def run(
                                   overrides=overrides, cache_dir=str(config.cache_dir),
                                   ib_ip_map=ib_ip_map, mgmt_ip_map=mgmt_ip_map)
             except Exception:
-                pass
+                logger.debug("Failed to update job metadata: %s", cluster_id, exc_info=True)
 
     # For GGUF models that were pre-synced, resolve the container-internal
     # cache path and inject it as the ``model`` override so the recipe
@@ -694,10 +732,8 @@ def search_cmd(ctx, registry, runtime, query):
 
 
 @main.command("status")
-@click.option("--hosts", "-H", default=None, help="Comma-separated host list")
-@click.option("--hosts-file", default=None, help="File with hosts (one per line, # comments)")
-@click.option("--cluster", "cluster_name", default=None, help="Use a saved cluster by name")
-@click.option("--dry-run", "-n", is_flag=True, help="Show what would be done")
+@host_options
+@dry_run_option
 @click.pass_context
 def status(ctx, hosts, hosts_file, cluster_name, dry_run):
     """Show sparkrun containers running on cluster hosts (alias for 'cluster status')."""
@@ -904,16 +940,13 @@ def setup_update(ctx):
 
 
 @setup.command("ssh")
-@click.option("--hosts", "-H", default=None, help="Comma-separated host list")
-@click.option("--hosts-file", default=None, help="File with hosts (one per line, # comments)")
-@click.option("--cluster", "cluster_name", default=None, type=CLUSTER_NAME,
-              help="Use a saved cluster by name")
+@host_options
 @click.option("--extra-hosts", default=None,
               help="Additional comma-separated hosts to include (e.g. control machine)")
 @click.option("--include-self/--no-include-self", default=True, show_default=True,
               help="Include this machine's hostname in the mesh")
 @click.option("--user", "-u", default=None, help="SSH username (default: current user)")
-@click.option("--dry-run", "-n", is_flag=True, help="Show what would be done")
+@dry_run_option
 @click.pass_context
 def setup_ssh(ctx, hosts, hosts_file, cluster_name, extra_hosts, include_self, user, dry_run):
     """Set up passwordless SSH mesh across cluster hosts.
@@ -953,16 +986,7 @@ def setup_ssh(ctx, hosts, hosts_file, cluster_name, extra_hosts, include_self, u
     )
 
     # Determine the cluster's configured user (if hosts came from a cluster)
-    cluster_user = None
-    resolved_cluster_name = cluster_name
-    if not resolved_cluster_name and not hosts and not hosts_file:
-        resolved_cluster_name = cluster_mgr.get_default()
-    if resolved_cluster_name:
-        try:
-            cluster_def = cluster_mgr.get(resolved_cluster_name)
-            cluster_user = cluster_def.user
-        except Exception:
-            pass
+    cluster_user = _resolve_cluster_user(cluster_name, hosts, hosts_file, cluster_mgr)
 
     # Track original cluster hosts before extras/self are appended
     cluster_hosts = list(host_list)
@@ -1025,12 +1049,9 @@ def setup_ssh(ctx, hosts, hosts_file, cluster_name, extra_hosts, include_self, u
 
 
 @setup.command("cx7")
-@click.option("--hosts", "-H", default=None, help="Comma-separated host list")
-@click.option("--hosts-file", default=None, help="File with hosts (one per line, # comments)")
-@click.option("--cluster", "cluster_name", default=None, type=CLUSTER_NAME,
-              help="Use a saved cluster by name")
+@host_options
 @click.option("--user", "-u", default=None, help="SSH username (default: from config or current user)")
-@click.option("--dry-run", "-n", is_flag=True, help="Show what would be done without making changes")
+@dry_run_option
 @click.option("--force", is_flag=True, help="Reconfigure even if existing config is valid")
 @click.option("--mtu", default=9000, show_default=True, type=int, help="MTU for CX7 interfaces")
 @click.option("--subnet1", default=None, help="Override subnet for CX7 partition 1 (e.g. 192.168.11.0/24)")
@@ -1093,16 +1114,7 @@ def setup_cx7(ctx, hosts, hosts_file, cluster_name, user, dry_run, force, mtu, s
         sys.exit(1)
 
     # Resolve SSH user
-    cluster_user = None
-    resolved_cluster_name = cluster_name
-    if not resolved_cluster_name and not hosts and not hosts_file:
-        resolved_cluster_name = cluster_mgr.get_default()
-    if resolved_cluster_name:
-        try:
-            cluster_def = cluster_mgr.get(resolved_cluster_name)
-            cluster_user = cluster_def.user
-        except Exception:
-            pass
+    cluster_user = _resolve_cluster_user(cluster_name, hosts, hosts_file, cluster_mgr)
 
     if user is None:
         user = cluster_user or config.ssh_user or os.environ.get("USER", "root")
@@ -1252,11 +1264,9 @@ def setup_cx7(ctx, hosts, hosts_file, cluster_name, user, dry_run, force, mtu, s
 
 @main.command()
 @click.argument("recipe_name", type=RECIPE_NAME)
-@click.option("--hosts", "-H", default=None, help="Comma-separated host list")
-@click.option("--hosts-file", default=None, help="File with hosts (one per line, # comments)")
-@click.option("--cluster", "cluster_name", default=None, help="Use a saved cluster by name")
+@host_options
 @click.option("--tp", "--tensor-parallel", "tp_override", type=int, default=None, help="Tensor parallel (to match host trimming from run)")
-@click.option("--dry-run", "-n", is_flag=True, help="Show what would be done")
+@dry_run_option
 # @click.option("--config", "config_path", default=None, help="Path to config file")
 @click.pass_context
 def stop(ctx, recipe_name, hosts, hosts_file, cluster_name, tp_override, dry_run, config_path=None):
@@ -1286,7 +1296,8 @@ def stop(ctx, recipe_name, hosts, hosts_file, cluster_name, tp_override, dry_run
     host_list = _apply_tp_trimming(host_list, recipe, tp_override=tp_override)
 
     from sparkrun.orchestration.primitives import build_ssh_kwargs, cleanup_containers, cleanup_containers_local
-    from sparkrun.orchestration.docker import generate_container_name, generate_cluster_id
+    from sparkrun.orchestration.docker import generate_container_name
+    from sparkrun.orchestration.job_metadata import generate_cluster_id
 
     cluster_id = generate_cluster_id(recipe, host_list)
     ssh_kwargs = build_ssh_kwargs(config)
@@ -1315,9 +1326,7 @@ def stop(ctx, recipe_name, hosts, hosts_file, cluster_name, tp_override, dry_run
 
 @main.command("logs")
 @click.argument("recipe_name", type=RECIPE_NAME)
-@click.option("--hosts", "-H", default=None, help="Comma-separated host list")
-@click.option("--hosts-file", default=None, help="File with hosts (one per line, # comments)")
-@click.option("--cluster", "cluster_name", default=None, help="Use a saved cluster by name")
+@host_options
 @click.option("--tp", "--tensor-parallel", "tp_override", type=int, default=None, help="Tensor parallel (to match host trimming from run)")
 @click.option("--tail", type=int, default=100, help="Number of log lines before following")
 # @click.option("--config", "config_path", default=None, help="Path to config file")
@@ -1335,7 +1344,7 @@ def logs_cmd(ctx, recipe_name, hosts, hosts_file, cluster_name, tp_override, tai
     """
     from sparkrun.bootstrap import init_sparkrun, get_runtime
     from sparkrun.config import SparkrunConfig
-    from sparkrun.orchestration.docker import generate_cluster_id
+    from sparkrun.orchestration.job_metadata import generate_cluster_id
 
     v = init_sparkrun()
     _setup_logging(ctx.obj["verbose"])
@@ -1554,10 +1563,8 @@ def cluster_default(ctx):
 
 
 @cluster.command("status")
-@click.option("--hosts", "-H", default=None, help="Comma-separated host list")
-@click.option("--hosts-file", default=None, help="File with hosts (one per line, # comments)")
-@click.option("--cluster", "cluster_name", default=None, help="Use a saved cluster by name")
-@click.option("--dry-run", "-n", is_flag=True, help="Show what would be done")
+@host_options
+@dry_run_option
 # @click.option("--config", "config_path", default=None, help="Path to config file")
 @click.pass_context
 def cluster_status(ctx, hosts, hosts_file, cluster_name, dry_run, config_path=None):
@@ -1615,7 +1622,7 @@ def cluster_status(ctx, hosts, hosts_file, cluster_name, dry_run, config_path=No
 
     # Display solo / ungrouped containers
     if result.solo_entries:
-        from sparkrun.orchestration.docker import load_job_metadata
+        from sparkrun.orchestration.job_metadata import load_job_metadata
         for host, name, status, image in result.solo_entries:
             cid = name.removesuffix("_solo")
             meta = load_job_metadata(cid, cache_dir=str(config.cache_dir)) or {}

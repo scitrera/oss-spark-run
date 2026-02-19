@@ -13,10 +13,10 @@ from __future__ import annotations
 import logging
 
 from sparkrun.containers.registry import ensure_image, get_image_id
+from sparkrun.orchestration.primitives import map_transfer_failures
 from sparkrun.orchestration.ssh import (
     RemoteResult,
     build_ssh_opts_string,
-    run_pipeline_to_remote,
     run_pipeline_to_remotes_parallel,
     run_remote_command,
     run_remote_script,
@@ -201,8 +201,7 @@ def distribute_image_from_local(
     )
 
     # Map transfer IPs back to management hosts for failure reporting
-    xfer_to_host = dict(zip(xfer, hosts))
-    failed = [xfer_to_host.get(r.host, r.host) for r in results if not r.success]
+    failed = map_transfer_failures(results, xfer, hosts)
     if failed:
         logger.warning("Image distribution failed on hosts: %s", failed)
     else:
