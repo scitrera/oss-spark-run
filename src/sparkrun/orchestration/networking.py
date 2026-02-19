@@ -697,3 +697,81 @@ def verify_cx7_config(
 ) -> dict[str, CX7HostDetection]:
     """Re-run CX7 detection to verify configuration was applied."""
     return detect_cx7_for_hosts(hosts, ssh_kwargs=ssh_kwargs, dry_run=dry_run)
+
+
+# ---------------------------------------------------------------------------
+# Host key distribution
+# ---------------------------------------------------------------------------
+
+
+def distribute_cx7_host_keys(
+    cx7_ips: list[str],
+    hosts: list[str],
+    ssh_kwargs: dict | None = None,
+    dry_run: bool = False,
+) -> list:
+    """Scan CX7 IPs and add to ``known_hosts`` on control machine and all hosts.
+
+    After CX7 configuration the new IPs are unknown SSH endpoints.
+    This runs ``ssh-keyscan`` to register their host keys so that
+    transfers and inter-node SSH over the CX7 network succeed without
+    host-key-verification prompts.
+
+    Args:
+        cx7_ips: All CX7 IPs across the cluster.
+        hosts: Management-IP host list (used to reach each host via SSH).
+        ssh_kwargs: SSH connection parameters.
+        dry_run: Log without executing.
+
+    Returns:
+        List of RemoteResult from the remote keyscan step.
+    """
+    import subprocess
+
+    from sparkrun.orchestration.ssh import run_remote_scripts_parallel
+
+    if not cx7_ips:
+        return []
+
+    ip_list = " ".join(cx7_ips)
+    script = (
+        "#!/bin/bash\n"
+        "set -uo pipefail\n"
+        "mkdir -p ~/.ssh\n"
+        "touch ~/.ssh/known_hosts\n"
+        "ADDED=0\n"
+        "for ip in %s; do\n"
+        '    keys=$(ssh-keyscan -H "$ip" 2>/dev/null)\n'
+        '    if [ -n "$keys" ]; then\n'
+        '        echo "$keys" >> ~/.ssh/known_hosts\n'
+        "        ADDED=$((ADDED + 1))\n"
+        "    fi\n"
+        "done\n"
+        "sort -u ~/.ssh/known_hosts -o ~/.ssh/known_hosts\n"
+        'echo "KEYSCAN_ADDED=$ADDED"\n'
+    ) % ip_list
+
+    # Local keyscan (control machine)
+    if not dry_run:
+        try:
+            subprocess.run(
+                ["bash", "-c", script],
+                timeout=30, capture_output=True, text=True,
+            )
+            logger.info("  local: CX7 host keys added to known_hosts")
+        except Exception as e:
+            logger.warning("  local: keyscan failed: %s", e)
+    else:
+        logger.info("[dry-run] Would scan %d CX7 IPs locally", len(cx7_ips))
+
+    # Remote keyscan on all hosts (via management IPs)
+    kw = ssh_kwargs or {}
+    results = run_remote_scripts_parallel(hosts, script, dry_run=dry_run, **kw)
+
+    for r in results:
+        if r.success:
+            logger.info("  %s: CX7 host keys added to known_hosts", r.host)
+        else:
+            logger.warning("  %s: keyscan failed: %s", r.host, r.stderr.strip()[:100])
+
+    return results

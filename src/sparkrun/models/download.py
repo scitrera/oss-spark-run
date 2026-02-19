@@ -302,6 +302,9 @@ def download_model(
 
     try:
         from huggingface_hub import snapshot_download
+        from huggingface_hub.utils import enable_progress_bars
+
+        enable_progress_bars()
 
         kwargs: dict = {
             "repo_id": model_id,
@@ -359,6 +362,9 @@ def _download_gguf(
 
     try:
         from huggingface_hub import snapshot_download
+        from huggingface_hub.utils import enable_progress_bars
+
+        enable_progress_bars()
 
         kwargs: dict = {
             "repo_id": repo_id,

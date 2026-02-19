@@ -328,7 +328,7 @@ def _setup_logging(verbose: bool):
 
     # Suppress noisy HTTP loggers (huggingface_hub uses httpx)
     for name in ("httpx", "httpcore.http11", "httpcore.connection",
-                 "urllib3.connectionpool", "huggingface_hub.file_download"):
+                 "urllib3.connectionpool"):
         logging.getLogger(name).setLevel(logging.WARNING)
 
 
@@ -1087,6 +1087,7 @@ def setup_cx7(ctx, hosts, hosts_file, cluster_name, user, dry_run, force, mtu, s
         CX7HostDetection,
         configure_cx7_host,
         detect_cx7_for_hosts,
+        distribute_cx7_host_keys,
         select_subnets,
         plan_cluster_cx7,
         apply_cx7_plan,
@@ -1241,9 +1242,7 @@ def setup_cx7(ctx, hosts, hosts_file, cluster_name, user, dry_run, force, mtu, s
     failed = sum(1 for r in final_results if not r.success)
 
     for r in final_results:
-        if r.success:
-            click.echo("  [OK] %s: configured" % r.host)
-        else:
+        if not r.success:
             click.echo("  [FAIL] %s: %s" % (r.host, r.stderr.strip()[:100]), err=True)
 
     click.echo()
@@ -1257,6 +1256,27 @@ def setup_cx7(ctx, hosts, hosts_file, cluster_name, user, dry_run, force, mtu, s
     if has_errors:
         parts.append("%d skipped (errors)" % has_errors)
     click.echo("Results: %s." % ", ".join(parts))
+
+    # Step 6: Distribute CX7 host keys to known_hosts
+    # Collect ALL CX7 IPs (both existing valid and newly configured) so that
+    # every host (and the control machine) can SSH to every CX7 IP.
+    all_cx7_ips = []
+    for hp in plan.host_plans:
+        for a in hp.assignments:
+            if a.ip:
+                all_cx7_ips.append(a.ip)
+
+    if all_cx7_ips and not dry_run:
+        click.echo()
+        click.echo("Distributing CX7 host keys to known_hosts...")
+        ks_results = distribute_cx7_host_keys(
+            all_cx7_ips, host_list, ssh_kwargs=ssh_kwargs, dry_run=dry_run,
+        )
+        ks_ok = sum(1 for r in ks_results if r.success)
+        ks_fail = sum(1 for r in ks_results if not r.success)
+        if ks_fail:
+            click.echo("  Warning: keyscan failed on %d host(s)." % ks_fail, err=True)
+        click.echo("  Host keys for %d CX7 IPs distributed to %d host(s) + local." % (len(all_cx7_ips), ks_ok))
 
     if failed:
         sys.exit(1)
