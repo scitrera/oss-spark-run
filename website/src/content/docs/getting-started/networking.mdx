@@ -120,7 +120,7 @@ An MTU mismatch *anywhere* in the path may result in packets being silently drop
 
 ## Setup sequence
 
-The end-to-end setup involves three sparkrun commands, followed by a cluster update. Register the cluster first so subsequent commands can reference it by name:
+The end-to-end setup involves three sparkrun commands. Register the cluster first so subsequent commands can reference it by name:
 
 | Step | Command | Notes |
 |---|---|---|
@@ -130,7 +130,7 @@ The end-to-end setup involves three sparkrun commands, followed by a cluster upd
 
 `sparkrun setup ssh` is interactive — it prompts for passwords and doesn't require pre-existing passwordless SSH. `sparkrun setup cx7` runs remote scripts non-interactively, so it **does** require passwordless SSH to already be in place. That's why SSH setup comes first.
 
-Your cluster stays registered with **management IPs** — there is no need to update it after CX-7 setup. sparkrun automatically discovers CX-7 interfaces on each host and uses them for high-bandwidth operations (model sync, container distribution, NCCL), while SSH orchestration continues over the management network.
+Your cluster stays registered with the **management IPs** — there is no need to update it after CX-7 setup. sparkrun automatically discovers CX-7 interfaces on each host and uses them for high-bandwidth operations (model sync, container distribution, NCCL), while SSH orchestration continues over the management network.
 
 ```bash
 # Step 1: Register cluster with management IPs
@@ -294,7 +294,7 @@ On the sender node:
 ib_write_bw 192.168.11.14 -d rocep1s0f1 --report_gbits -q 4 -R --force-link IB
 ```
 
-You should see approximately **110 Gbps** per RoCE interface. With both twins active via NCCL, aggregate bandwidth approaches 200 Gbps.
+You should see approximately **100 Gbps** per RoCE interface. With both twins active via NCCL, aggregate bandwidth approaches 200 Gbps.
 
 ### Latency test
 
@@ -320,8 +320,9 @@ Typical latency between two directly connected Sparks is approximately **1.5 mic
 | IP addressing | Static IPs on both CX-7 partitions, different subnets |
 | MTU | 9000 on all CX-7 interfaces (and switch ports) |
 | Management traffic | Route over 10 Gbps built-in Ethernet, not CX-7 |
+| Inference traffic | Route over 10 Gbps built-in Ethernet, not CX-7 |
 | Cluster traffic | NCCL, model sync, container distribution over CX-7 only |
 | OS | DGX OS (do not switch distributions) |
 | User account | Same username on every node, member of `docker` group |
 | Required tools | `rsync`, `git`, `docker` (pre-installed on DGX OS) |
-| Switch (3+ nodes) | Required — daisy-chaining limits to ~100 Gbps per link |
+| Switch (3+ nodes) | Required to maximize bandwidth |
