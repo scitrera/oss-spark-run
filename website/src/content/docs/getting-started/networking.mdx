@@ -126,7 +126,7 @@ The end-to-end setup involves three sparkrun commands. Register the cluster firs
 |---|---|---|
 | 1. Register cluster | `sparkrun cluster create mylab --hosts <mgmt-IPs>` | Save hosts by name using management IPs |
 | 2. SSH access | `sparkrun setup ssh` | Interactive — prompts for passwords; uses default cluster |
-| 3. CX-7 networking | `sparkrun setup cx7` | Requires passwordless SSH from step 2 |
+| 3. CX-7 networking | `sparkrun setup cx7` | Requires passwordless SSH from step 2. Will also prompt for passwords as needed |
 
 `sparkrun setup ssh` is interactive — it prompts for passwords and doesn't require pre-existing passwordless SSH. `sparkrun setup cx7` runs remote scripts non-interactively, so it **does** require passwordless SSH to already be in place. That's why SSH setup comes first.
 
