@@ -64,3 +64,48 @@ sudo chown -R $USER:$USER ~/.cache/huggingface
 - Let sparkrun handle model downloading and distribution — it downloads as your user and rsyncs to target nodes.
 - Avoid running `huggingface-cli download` or model download scripts inside inference containers. Download on the host instead.
 - Run `sparkrun setup fix-permissions --save-sudo` once per cluster so that cache ownership is corrected automatically on every launch.
+
+## Linux page cache consuming memory
+
+DGX Spark systems have 128 GB of unified CPU/GPU memory. The Linux kernel's page cache can consume a significant portion of this, reducing the memory available for inference containers. While the kernel will reclaim cached pages under pressure, large cached datasets can cause initial allocation failures or slower model loading.
+
+**Symptoms:**
+
+- Out-of-memory errors when launching large models that should fit in VRAM
+- Model loading is slower than expected on a freshly booted system with prior file I/O
+- `free -h` shows large amounts of memory in the "buff/cache" column
+
+**Fix:**
+
+sparkrun has a built-in command to drop the page cache across all cluster hosts:
+
+```bash
+# Clear page cache on your default cluster
+sparkrun setup clear-cache
+
+# Or target specific hosts
+sparkrun setup clear-cache --cluster mylab
+
+# Preview what would be done
+sparkrun setup clear-cache --cluster mylab --dry-run
+```
+
+This runs `sync` followed by writing `3` to `/proc/sys/vm/drop_caches` on each host, which safely drops the page cache, dentries, and inodes.
+
+**Automatic clearing on every run:**
+
+sparkrun automatically attempts to drop the page cache on all target hosts before launching containers. If non-interactive sudo is available (either via general NOPASSWD or a scoped sudoers entry), this happens silently. If sudo isn't available, sparkrun logs a warning and continues.
+
+To make this automatic clearing work without ever needing a password, run `--save-sudo` once:
+
+```bash
+# Install a scoped sudoers entry on all cluster hosts (one-time setup)
+sparkrun setup clear-cache --cluster mylab --save-sudo
+```
+
+This installs a minimal sudoers rule on each host that permits **only** writing to `/proc/sys/vm/drop_caches` without a password — no broader sudo privileges are granted. After this, every future `sparkrun run` silently clears the page cache before launching containers.
+
+```bash
+# Preview what the sudoers entry would look like
+sparkrun setup clear-cache --cluster mylab --save-sudo --dry-run
+```
