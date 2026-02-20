@@ -12,6 +12,7 @@ import subprocess
 import time
 
 from sparkrun.config import SparkrunConfig, resolve_cache_dir
+from sparkrun.utils import is_valid_ip  # noqa: F401 — re-exported for callers
 from sparkrun.orchestration.ssh import (
     RemoteResult,
     run_remote_command,
@@ -270,12 +271,9 @@ def try_clear_page_cache(
     ``sparkrun setup clear-cache --save-sudo``.
     """
     from sparkrun.hosts import is_local_host
+    from sparkrun.scripts import read_script
 
-    script = (
-        'set -euo pipefail\n'
-        'sync\n'
-        'echo 3 | sudo -n /usr/bin/tee /proc/sys/vm/drop_caches > /dev/null 2>&1\n'
-    )
+    script = read_script("clear_cache.sh")
 
     kw = ssh_kwargs or {}
     local_hosts = [h for h in hosts if is_local_host(h)]
@@ -473,19 +471,6 @@ def wait_for_port(
         time.sleep(retry_interval)
 
     return False
-
-
-# ---------------------------------------------------------------------------
-# IP validation
-# ---------------------------------------------------------------------------
-
-def is_valid_ip(ip: str) -> bool:
-    """Basic check if a string looks like an IPv4 address."""
-    # TODO: either do regex or use ipaddress module
-    parts = ip.strip().split(".")
-    if len(parts) != 4:
-        return False
-    return all(p.isdigit() and 0 <= int(p) <= 255 for p in parts)
 
 
 # ---------------------------------------------------------------------------

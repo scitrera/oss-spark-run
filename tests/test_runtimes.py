@@ -513,14 +513,19 @@ class TestBaseFollowLogs:
         assert args[0][0] == "localhost"
         assert args[0][1] == "sparkrun0_solo"
 
-    def test_follow_logs_cluster_raises(self):
-        """Base _follow_cluster_logs raises NotImplementedError."""
+    @mock.patch("sparkrun.orchestration.ssh.stream_remote_logs")
+    def test_follow_logs_cluster_uses_docker_logs(self, mock_stream):
+        """Base _follow_cluster_logs streams docker logs on head node."""
         runtime = _StubRuntime()
-        with pytest.raises(NotImplementedError):
-            runtime.follow_logs(
-                hosts=["10.0.0.1", "10.0.0.2"],
-                cluster_id="test0",
-            )
+        runtime.follow_logs(
+            hosts=["10.0.0.1", "10.0.0.2"],
+            cluster_id="test0",
+        )
+
+        mock_stream.assert_called_once()
+        args = mock_stream.call_args
+        assert args[0][0] == "10.0.0.1"
+        assert args[0][1] == "test0_head"
 
 
 class TestVllmFollowLogs:

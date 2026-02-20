@@ -98,93 +98,22 @@ class VllmRuntime(RuntimePlugin):
         """Validate vLLM-specific recipe fields."""
         return super().validate_recipe(recipe)
 
-    # --- Log following ---
+    # --- Log following hooks ---
 
-    def _follow_cluster_logs(
+    def _cluster_log_mode(self) -> str:
+        """vLLM uses sleep-infinity + exec, so tail the serve log file."""
+        return "file"
+
+    # --- Cluster launch / stop ---
+
+    def _stop_cluster(
             self,
             hosts: list[str],
             cluster_id: str,
             config=None,
             dry_run: bool = False,
-            tail: int = 100,
-    ) -> None:
-        """Follow logs for a vLLM Ray cluster.
-
-        vLLM uses sleep-infinity + exec for all containers (head and solo),
-        so we tail the serve log file inside the head container.
-        """
-        from sparkrun.orchestration.primitives import build_ssh_kwargs
-        from sparkrun.orchestration.docker import generate_container_name
-        from sparkrun.orchestration.ssh import stream_container_file_logs
-
-        host = hosts[0]
-        container_name = generate_container_name(cluster_id, "head")
-        ssh_kwargs = build_ssh_kwargs(config)
-        stream_container_file_logs(
-            host, container_name, tail=tail, dry_run=dry_run, **ssh_kwargs,
-        )
-
-    # --- Launch / Stop ---
-
-    def run(
-            self,
-            hosts: list[str],
-            image: str,
-            serve_command: str,
-            recipe: Recipe,
-            overrides: dict[str, Any],
-            *,
-            cluster_id: str = "sparkrun0",
-            env: dict[str, str] | None = None,
-            cache_dir: str | None = None,
-            config=None,
-            dry_run: bool = False,
-            detached: bool = True,
-            skip_ib_detect: bool = False,
-            nccl_env: dict[str, str] | None = None,
-            ray_port: int = 46379,
-            dashboard_port: int = 8265,
-            dashboard: bool = False,
-            **kwargs,
     ) -> int:
-        """Launch a vLLM workload — solo or Ray cluster.
-
-        For a single host, delegates to the base solo implementation.
-        For multiple hosts, orchestrates a Ray cluster: head node, workers,
-        then exec serve on head.
-        """
-        if len(hosts) <= 1:
-            return self._run_solo(
-                host=hosts[0] if hosts else "localhost",
-                image=image, serve_command=serve_command,
-                cluster_id=cluster_id, env=env, cache_dir=cache_dir,
-                config=config, dry_run=dry_run, detached=detached,
-                skip_ib_detect=skip_ib_detect, nccl_env=nccl_env,
-            )
-
-        return self._run_ray_cluster(
-            hosts=hosts, image=image, serve_command=serve_command,
-            cluster_id=cluster_id, env=env, cache_dir=cache_dir,
-            config=config, dry_run=dry_run, detached=detached,
-            skip_ib_detect=skip_ib_detect, nccl_env=nccl_env,
-            ray_port=ray_port,
-            dashboard_port=dashboard_port, dashboard=dashboard,
-        )
-
-    def stop(
-            self,
-            hosts: list[str],
-            cluster_id: str = "sparkrun0",
-            config=None,
-            dry_run: bool = False,
-    ) -> int:
-        """Stop a vLLM workload — solo or Ray cluster."""
-        if len(hosts) <= 1:
-            return self._stop_solo(
-                host=hosts[0] if hosts else "localhost",
-                cluster_id=cluster_id, config=config, dry_run=dry_run,
-            )
-
+        """Stop a vLLM Ray cluster."""
         from sparkrun.orchestration.primitives import build_ssh_kwargs, cleanup_containers
         from sparkrun.orchestration.docker import generate_container_name
 
@@ -199,22 +128,26 @@ class VllmRuntime(RuntimePlugin):
         logger.info("Cluster '%s' stopped on %d host(s)", cluster_id, len(hosts))
         return 0
 
-    def _run_ray_cluster(
+    def _run_cluster(
             self,
             hosts: list[str],
             image: str,
             serve_command: str,
-            cluster_id: str,
-            env: dict[str, str] | None,
-            cache_dir: str | None,
-            config,
-            dry_run: bool,
-            detached: bool,
-            skip_ib_detect: bool,
-            ray_port: int,
-            dashboard_port: int,
-            dashboard: bool,
+            recipe=None,
+            overrides=None,
+            *,
+            cluster_id: str = "sparkrun0",
+            env: dict[str, str] | None = None,
+            cache_dir: str | None = None,
+            config=None,
+            dry_run: bool = False,
+            detached: bool = True,
+            skip_ib_detect: bool = False,
             nccl_env: dict[str, str] | None = None,
+            ray_port: int = 46379,
+            dashboard_port: int = 8265,
+            dashboard: bool = False,
+            **kwargs,
     ) -> int:
         """Orchestrate a multi-node Ray cluster for vLLM.
 
@@ -251,8 +184,11 @@ class VllmRuntime(RuntimePlugin):
         runtime_env = self.get_cluster_env(head_ip="<pending>", num_nodes=len(hosts))
         all_env = merge_env(env, runtime_env)
 
-        self._print_ray_banner(
-            hosts, image, cluster_id, ray_port, dashboard_port, serve_command, dry_run,
+        self._print_cluster_banner(
+            "Ray Cluster Launcher", hosts, image, cluster_id,
+            {"Ray Port": ray_port, "Dashboard Port": dashboard_port,
+             "Command": serve_command[:80]},
+            dry_run,
         )
 
         # Step 1: Cleanup
@@ -366,10 +302,8 @@ class VllmRuntime(RuntimePlugin):
             detached=detached,
         )
 
-        self._print_ray_connection_info(
-            head_host, head_ip, head_container,
-            worker_hosts, worker_container, dashboard_port,
-        )
+        self._print_connection_info(hosts, cluster_id, head_ip=head_ip,
+                                    dashboard_port=dashboard_port)
 
         exec_result = run_remote_script(
             head_host, exec_script, timeout=60, dry_run=dry_run, **ssh_kwargs,
@@ -380,35 +314,14 @@ class VllmRuntime(RuntimePlugin):
             return 0
         return exec_result.returncode
 
-    @staticmethod
-    def _print_ray_banner(
-            hosts, image, cluster_id, ray_port, dashboard_port, command, dry_run,
-    ):
-        mode = "DRY-RUN" if dry_run else "LIVE"
+    def _print_connection_info(self, hosts, cluster_id, head_ip=None,
+                               dashboard_port=8265):
+        """Print vLLM-specific connection info including Dashboard URL."""
         logger.info("=" * 60)
-        logger.info("sparkrun Ray Cluster Launcher")
-        logger.info("=" * 60)
-        logger.info("Cluster ID:     %s", cluster_id)
-        logger.info("Image:          %s", image)
-        logger.info("Head Node:      %s", hosts[0])
-        logger.info(
-            "Worker Nodes:   %s",
-            ", ".join(hosts[1:]) if len(hosts) > 1 else "<none>",
-        )
-        logger.info("Ray Port:       %s", ray_port)
-        logger.info("Dashboard Port: %s", dashboard_port)
-        logger.info("Command:        %s", command[:80])
-        logger.info("Mode:           %s", mode)
-        logger.info("=" * 60)
-
-    @staticmethod
-    def _print_ray_connection_info(
-            head_host, head_ip, head_container,
-            worker_hosts, worker_container, dashboard_port,
-    ):
-        host_list = ",".join([head_host] + worker_hosts)
-        logger.info("=" * 60)
-        logger.info("To view logs:    sparkrun logs <recipe> --hosts %s", host_list)
-        logger.info("To stop cluster: sparkrun stop <recipe> --hosts %s", host_list)
-        logger.info("Dashboard:       http://%s:%d", head_ip, dashboard_port)
+        logger.info("Cluster launched successfully. Nodes: %d", len(hosts))
+        logger.info("")
+        logger.info("To view logs:    sparkrun logs <recipe> --hosts %s", ",".join(hosts))
+        logger.info("To stop cluster: sparkrun stop <recipe> --hosts %s", ",".join(hosts))
+        if head_ip:
+            logger.info("Dashboard:       http://%s:%d", head_ip, dashboard_port)
         logger.info("=" * 60)

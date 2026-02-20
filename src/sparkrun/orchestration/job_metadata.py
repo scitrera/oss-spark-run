@@ -94,8 +94,9 @@ def load_job_metadata(cluster_id: str, cache_dir: str | None = None) -> dict | N
     if not meta_path.exists():
         return None
     try:
-        with open(meta_path) as f:
-            return yaml.safe_load(f)
+        from sparkrun.utils import load_yaml
+        data = load_yaml(meta_path)
+        return data or None
     except Exception:
         logger.debug("Failed to load job metadata for %s", cluster_id, exc_info=True)
         return None

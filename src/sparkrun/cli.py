@@ -12,28 +12,13 @@ from sparkrun import __version__
 logger = logging.getLogger(__name__)
 
 
-def _coerce_value(value: str):
-    """Auto-coerce a string value to int, float, or bool if appropriate."""
-    if value.lower() in ("true", "yes"):
-        return True
-    if value.lower() in ("false", "no"):
-        return False
-    try:
-        return int(value)
-    except ValueError:
-        pass
-    try:
-        return float(value)
-    except ValueError:
-        pass
-    return value
-
-
 def _parse_options(options: tuple[str, ...]) -> dict:
     """Parse --option key=value pairs into a dict.
 
     Values are auto-coerced to int/float/bool where possible.
     """
+    from sparkrun.utils import coerce_value
+
     result = {}
     for opt in options:
         if "=" not in opt:
@@ -51,7 +36,7 @@ def _parse_options(options: tuple[str, ...]) -> dict:
                 err=True,
             )
             sys.exit(1)
-        result[key] = _coerce_value(value)
+        result[key] = coerce_value(value)
     return result
 
 
@@ -178,6 +163,21 @@ def _resolve_hosts_or_exit(hosts, hosts_file, cluster_name, config, v=None):
     return host_list, cluster_mgr
 
 
+def _resolve_setup_context(hosts, hosts_file, cluster_name, config, user=None):
+    """Resolve hosts, user, and SSH kwargs for setup commands."""
+    import os
+    from sparkrun.orchestration.primitives import build_ssh_kwargs
+
+    host_list, cluster_mgr = _resolve_hosts_or_exit(hosts, hosts_file, cluster_name, config)
+    cluster_user = _resolve_cluster_user(cluster_name, hosts, hosts_file, cluster_mgr)
+    if user is None:
+        user = cluster_user or config.ssh_user or os.environ.get("USER", "root")
+    ssh_kwargs = build_ssh_kwargs(config)
+    if user:
+        ssh_kwargs["ssh_user"] = user
+    return host_list, user, ssh_kwargs
+
+
 def _shell_rc_file(shell):
     """Return the RC file path for a given shell name.
 
@@ -245,11 +245,11 @@ CLUSTER_NAME = ClusterNameType()
 def host_options(f):
     """Common host-targeting options: --hosts, --hosts-file, --cluster."""
     f = click.option("--cluster", "cluster_name", default=None, type=CLUSTER_NAME,
-                      help="Use a saved cluster by name")(f)
+                     help="Use a saved cluster by name")(f)
     f = click.option("--hosts-file", default=None,
-                      help="File with hosts (one per line, # comments)")(f)
+                     help="File with hosts (one per line, # comments)")(f)
     f = click.option("--hosts", "-H", default=None,
-                      help="Comma-separated host list")(f)
+                     help="Comma-separated host list")(f)
     return f
 
 
@@ -430,16 +430,7 @@ def run(
         click.echo(f"Warning: {issue}", err=True)
 
     # Determine hosts
-    from sparkrun.hosts import resolve_hosts
-
-    cluster_mgr = _get_cluster_manager(v)
-    host_list = resolve_hosts(
-        hosts=hosts,
-        hosts_file=hosts_file,
-        cluster_name=cluster_name,
-        cluster_manager=cluster_mgr,
-        config_default_hosts=config.default_hosts,
-    )
+    host_list, cluster_mgr = _resolve_hosts_or_exit(hosts, hosts_file, cluster_name, config, v)
 
     # Determine host source for display
     if hosts:
@@ -639,80 +630,15 @@ def list_cmd(ctx, registry, runtime, query):
 
 
 def _display_recipe_detail(recipe, show_vram=True, registry_name=None, cli_overrides=None):
-    """Display recipe details (shared by show and recipe show commands)."""
-    click.echo(f"Name:         {recipe.name}")
-    click.echo(f"Description:  {recipe.description}")
-    if recipe.maintainer:
-        click.echo(f"Maintainer:   {recipe.maintainer}")
-    click.echo(f"Runtime:      {recipe.runtime}")
-    click.echo(f"Model:        {recipe.model}")
-    click.echo(f"Container:    {recipe.container}")
-    max_nodes = recipe.max_nodes or "unlimited"
-    click.echo(f"Nodes:        {recipe.min_nodes} - {max_nodes}")
-    click.echo(f"Repository:   {registry_name or 'Local'}")
-    click.echo(f"File Path:    {recipe.source_path}")
-
-    if recipe.defaults:
-        click.echo("\nDefaults:")
-        for k, v in sorted(recipe.defaults.items()):
-            click.echo(f"  {k}: {v}")
-
-    if recipe.env:
-        click.echo("\nEnvironment:")
-        for k, v in sorted(recipe.env.items()):
-            click.echo(f"  {k}={v}")
-
-    if recipe.command:
-        click.echo(f"\nCommand:\n  {recipe.command.strip()}")
-
-    if show_vram:
-        _display_vram_estimate(recipe, cli_overrides=cli_overrides)
+    """Display recipe details (delegates to cli_formatters)."""
+    from sparkrun.utils.cli_formatters import display_recipe_detail
+    display_recipe_detail(recipe, show_vram=show_vram, registry_name=registry_name, cli_overrides=cli_overrides)
 
 
 def _display_vram_estimate(recipe, cli_overrides=None, auto_detect=True):
-    """Display VRAM estimation for a recipe."""
-    from sparkrun.vram import DGX_SPARK_VRAM_GB
-
-    try:
-        est = recipe.estimate_vram(cli_overrides=cli_overrides, auto_detect=auto_detect)
-    except Exception as e:
-        click.echo(f"\nVRAM estimation failed: {e}", err=True)
-        return
-
-    click.echo("\nVRAM Estimation:")
-    if est.model_dtype:
-        click.echo(f"  Model dtype:      {est.model_dtype}")
-    if est.model_params:
-        click.echo(f"  Model params:     {est.model_params:,}")
-    click.echo(f"  KV cache dtype:   {est.kv_dtype or 'bfloat16 (default)'}")
-    if all([est.num_layers, est.num_kv_heads, est.head_dim]):
-        click.echo(f"  Architecture:     {est.num_layers} layers, {est.num_kv_heads} KV heads, {est.head_dim} head_dim")
-    click.echo(f"  Model weights:    {est.model_weights_gb:.2f} GB")
-    if est.kv_cache_total_gb is not None:
-        click.echo(f"  KV cache:         {est.kv_cache_total_gb:.2f} GB (max_model_len={est.max_model_len:,})")
-    click.echo(f"  Tensor parallel:  {est.tensor_parallel}")
-    click.echo(f"  Per-GPU total:    {est.total_per_gpu_gb:.2f} GB")
-    fit_str = "YES" if est.fits_dgx_spark else "EXCEEDS %.0f GB" % DGX_SPARK_VRAM_GB
-    click.echo(f"  DGX Spark fit:    {fit_str}")
-
-    # GPU memory budget analysis
-    if est.gpu_memory_utilization is not None:
-        click.echo(f"\n  GPU Memory Budget:")
-        click.echo(f"    gpu_memory_utilization: {est.gpu_memory_utilization:.0%}")
-        click.echo(f"    Usable GPU memory:     {est.usable_gpu_memory_gb:.1f} GB"
-                   f" ({DGX_SPARK_VRAM_GB:.0f} GB x {est.gpu_memory_utilization:.0%})")
-        click.echo(f"    Available for KV:      {est.available_kv_gb:.1f} GB")
-        if est.max_context_tokens is not None:
-            click.echo(f"    Max context tokens:    {est.max_context_tokens:,}")
-            if est.context_multiplier is not None and est.max_model_len:
-                click.echo(f"    Context multiplier:    {est.context_multiplier:.1f}x"
-                           f" (vs max_model_len={est.max_model_len:,})")
-                if est.context_multiplier < 1.0:
-                    click.echo(f"    WARNING: max_model_len exceeds available KV budget"
-                               f" ({est.context_multiplier:.1%} fits)")
-
-    for w in est.warnings:
-        click.echo(f"  Warning: {w}")
+    """Display VRAM estimation (delegates to cli_formatters)."""
+    from sparkrun.utils.cli_formatters import display_vram_estimate
+    display_vram_estimate(recipe, cli_overrides=cli_overrides, auto_detect=auto_detect)
 
 
 @main.command()
@@ -1083,11 +1009,7 @@ def setup_cx7(ctx, hosts, hosts_file, cluster_name, user, dry_run, force, mtu, s
 
       sparkrun setup cx7 --cluster mylab --force
     """
-    import os
-
     from sparkrun.config import SparkrunConfig
-    from sparkrun.hosts import resolve_hosts
-    from sparkrun.orchestration.primitives import build_ssh_kwargs
     from sparkrun.orchestration.networking import (
         CX7HostDetection,
         configure_cx7_host,
@@ -1104,31 +1026,7 @@ def setup_cx7(ctx, hosts, hosts_file, cluster_name, user, dry_run, force, mtu, s
         sys.exit(1)
 
     config = SparkrunConfig()
-
-    # Resolve hosts
-    cluster_mgr = _get_cluster_manager()
-    host_list = resolve_hosts(
-        hosts=hosts,
-        hosts_file=hosts_file,
-        cluster_name=cluster_name,
-        cluster_manager=cluster_mgr,
-        config_default_hosts=config.default_hosts,
-    )
-
-    if not host_list:
-        click.echo("Error: No hosts specified. Use --hosts, --hosts-file, or --cluster.", err=True)
-        sys.exit(1)
-
-    # Resolve SSH user
-    cluster_user = _resolve_cluster_user(cluster_name, hosts, hosts_file, cluster_mgr)
-
-    if user is None:
-        user = cluster_user or config.ssh_user or os.environ.get("USER", "root")
-
-    # Build SSH kwargs
-    ssh_kwargs = build_ssh_kwargs(config)
-    if user:
-        ssh_kwargs["ssh_user"] = user
+    host_list, user, ssh_kwargs = _resolve_setup_context(hosts, hosts_file, cluster_name, config, user)
 
     # Step 1: Detect
     detections = detect_cx7_for_hosts(host_list, ssh_kwargs=ssh_kwargs, dry_run=dry_run)
@@ -1202,7 +1100,7 @@ def setup_cx7(ctx, hosts, hosts_file, cluster_name, user, dry_run, force, mtu, s
     sudo_hosts_needing_pw = {
         hp.host for hp in plan.host_plans
         if hp.needs_change and len(hp.assignments) == 2
-        and not detections.get(hp.host, CX7HostDetection(host="")).sudo_ok
+           and not detections.get(hp.host, CX7HostDetection(host="")).sudo_ok
     }
     sudo_password = None
     if sudo_hosts_needing_pw:
@@ -1321,30 +1219,12 @@ def setup_fix_permissions(ctx, hosts, hosts_file, cluster_name, user, cache_dir,
 
       sparkrun setup fix-permissions --cluster mylab --dry-run
     """
-    import os
-
     from sparkrun.config import SparkrunConfig
-    from sparkrun.orchestration.primitives import build_ssh_kwargs
-    from sparkrun.orchestration.ssh import (
-        run_remote_scripts_parallel,
-        run_remote_sudo_script,
-    )
+    from sparkrun.orchestration.sudo import run_with_sudo_fallback
+    from sparkrun.orchestration.ssh import run_remote_sudo_script
 
     config = SparkrunConfig()
-
-    # Resolve hosts
-    cluster_mgr = _get_cluster_manager()
-    host_list, cluster_mgr = _resolve_hosts_or_exit(hosts, hosts_file, cluster_name, config)
-
-    # Resolve SSH user
-    cluster_user = _resolve_cluster_user(cluster_name, hosts, hosts_file, cluster_mgr)
-    if user is None:
-        user = cluster_user or config.ssh_user or os.environ.get("USER", "root")
-
-    # Build SSH kwargs
-    ssh_kwargs = build_ssh_kwargs(config)
-    if user:
-        ssh_kwargs["ssh_user"] = user
+    host_list, user, ssh_kwargs = _resolve_setup_context(hosts, hosts_file, cluster_name, config, user)
 
     # Resolve cache path
     cache_path = cache_dir  # None means use getent-based home detection
@@ -1356,53 +1236,14 @@ def setup_fix_permissions(ctx, hosts, hosts_file, cluster_name, user, cache_dir,
 
     sudo_password = None
 
+    from sparkrun.scripts import read_script
+
     # --save-sudo: install scoped sudoers entry on each host
     if save_sudo:
         click.echo("Installing sudoers entry for passwordless chown...")
-        if cache_path:
-            sudoers_script = (
-                'set -euo pipefail\n'
-                'CACHE_DIR="{cache_dir}"\n'
-                'CHOWN_PATH="/usr/bin/chown"\n'
-                'SUDOERS_FILE="/etc/sudoers.d/sparkrun-chown-{user}"\n'
-                '\n'
-                'cat > "$SUDOERS_FILE" << SUDOERS_EOF\n'
-                '# Installed by: sparkrun setup fix-permissions --save-sudo\n'
-                '{user} ALL=(root) NOPASSWD: $CHOWN_PATH -R {user} $CACHE_DIR\n'
-                'SUDOERS_EOF\n'
-                '\n'
-                'if visudo -cf "$SUDOERS_FILE" >/dev/null 2>&1; then\n'
-                '    chmod 0440 "$SUDOERS_FILE"\n'
-                '    echo "OK: installed sudoers entry in $SUDOERS_FILE"\n'
-                'else\n'
-                '    rm -f "$SUDOERS_FILE"\n'
-                '    echo "ERROR: sudoers validation failed"\n'
-                '    exit 1\n'
-                'fi\n'
-            ).format(cache_dir=cache_path, user=user)
-        else:
-            sudoers_script = (
-                'set -euo pipefail\n'
-                'TARGET_HOME=$(getent passwd "{user}" | cut -d: -f6)\n'
-                'if [ -z "$TARGET_HOME" ]; then echo "ERROR: cannot resolve home for {user}"; exit 1; fi\n'
-                'CACHE_DIR="$TARGET_HOME/.cache/huggingface"\n'
-                'CHOWN_PATH="/usr/bin/chown"\n'
-                'SUDOERS_FILE="/etc/sudoers.d/sparkrun-chown-{user}"\n'
-                '\n'
-                'cat > "$SUDOERS_FILE" << SUDOERS_EOF\n'
-                '# Installed by: sparkrun setup fix-permissions --save-sudo\n'
-                '{user} ALL=(root) NOPASSWD: $CHOWN_PATH -R {user} $CACHE_DIR\n'
-                'SUDOERS_EOF\n'
-                '\n'
-                'if visudo -cf "$SUDOERS_FILE" >/dev/null 2>&1; then\n'
-                '    chmod 0440 "$SUDOERS_FILE"\n'
-                '    echo "OK: installed sudoers entry in $SUDOERS_FILE"\n'
-                'else\n'
-                '    rm -f "$SUDOERS_FILE"\n'
-                '    echo "ERROR: sudoers validation failed"\n'
-                '    exit 1\n'
-                'fi\n'
-            ).format(user=user)
+        sudoers_script = read_script("fix_permissions_sudoers.sh").format(
+            user=user, cache_dir=cache_path or "",
+        )
 
         if dry_run:
             click.echo("  [dry-run] Would install sudoers entry on %d host(s):" % len(host_list))
@@ -1429,72 +1270,37 @@ def setup_fix_permissions(ctx, hosts, hosts_file, cluster_name, user, cache_dir,
     # Generate the chown script with sudo -n (non-interactive).
     # Uses getent passwd to resolve the target user's home directory,
     # avoiding tilde/HOME ambiguity when running under sudo.
-    if cache_path:
-        chown_script = (
-            'set -euo pipefail\n'
-            'CACHE_DIR="{cache_dir}"\n'
-            '[ -d "$CACHE_DIR" ] || {{ echo "SKIP: $CACHE_DIR does not exist"; exit 0; }}\n'
-            'sudo -n /usr/bin/chown -R {user} "$CACHE_DIR" 2>/dev/null\n'
-            'echo "OK: fixed permissions on $CACHE_DIR for {user}"\n'
-        ).format(cache_dir=cache_path, user=user)
-    else:
-        chown_script = (
-            'set -euo pipefail\n'
-            'TARGET_HOME=$(getent passwd "{user}" | cut -d: -f6)\n'
-            'if [ -z "$TARGET_HOME" ]; then echo "ERROR: cannot resolve home for {user}"; exit 1; fi\n'
-            'CACHE_DIR="$TARGET_HOME/.cache/huggingface"\n'
-            '[ -d "$CACHE_DIR" ] || {{ echo "SKIP: $CACHE_DIR does not exist"; exit 0; }}\n'
-            'sudo -n /usr/bin/chown -R {user} "$CACHE_DIR" 2>/dev/null\n'
-            'echo "OK: fixed permissions on $CACHE_DIR for {user}"\n'
-        ).format(user=user)
-
-    # Password-based fallback script (no sudo prefix — run_remote_sudo_script runs as root)
-    if cache_path:
-        fallback_script = (
-            'set -euo pipefail\n'
-            'CACHE_DIR="{cache_dir}"\n'
-            '[ -d "$CACHE_DIR" ] || {{ echo "SKIP: $CACHE_DIR does not exist"; exit 0; }}\n'
-            'chown -R {user} "$CACHE_DIR"\n'
-            'echo "OK: fixed permissions on $CACHE_DIR for {user}"\n'
-        ).format(cache_dir=cache_path, user=user)
-    else:
-        fallback_script = (
-            'set -euo pipefail\n'
-            'TARGET_HOME=$(getent passwd "{user}" | cut -d: -f6)\n'
-            'if [ -z "$TARGET_HOME" ]; then echo "ERROR: cannot resolve home for {user}"; exit 1; fi\n'
-            'CACHE_DIR="$TARGET_HOME/.cache/huggingface"\n'
-            '[ -d "$CACHE_DIR" ] || {{ echo "SKIP: $CACHE_DIR does not exist"; exit 0; }}\n'
-            'chown -R {user} "$CACHE_DIR"\n'
-            'echo "OK: fixed permissions on $CACHE_DIR for {user}"\n'
-        ).format(user=user)
-
-    # Step 1: Try non-interactive sudo on all hosts in parallel
-    parallel_results = run_remote_scripts_parallel(
-        host_list, chown_script, timeout=300, dry_run=dry_run, **ssh_kwargs,
+    chown_script = read_script("fix_permissions.sh").format(
+        user=user, cache_dir=cache_path or "",
     )
 
-    # Partition results: successes vs failures needing password
-    result_map: dict[str, object] = {}
-    failed_hosts = []
-    for r in parallel_results:
-        if r.success:
-            result_map[r.host] = r
-        else:
-            failed_hosts.append(r.host)
+    # Password-based fallback script (no sudo prefix — run_remote_sudo_script runs as root)
+    fallback_script = read_script("fix_permissions_fallback.sh").format(
+        user=user, cache_dir=cache_path or "",
+    )
 
-    # Step 2: For failed hosts, fall back to password-based sudo
-    if failed_hosts and not dry_run:
+    # Try non-interactive sudo, then password-based fallback
+    if not dry_run and sudo_password is None:
+        # Prompt only if parallel run produces failures (deferred below)
+        pass
+
+    result_map, still_failed = run_with_sudo_fallback(
+        host_list, chown_script, fallback_script, ssh_kwargs,
+        dry_run=dry_run, sudo_password=sudo_password,
+    )
+
+    # If hosts failed without a password, prompt and retry
+    if still_failed and not dry_run:
         if sudo_password is None:
-            click.echo("Sudo password required for %d host(s)." % len(failed_hosts))
+            click.echo("Sudo password required for %d host(s)." % len(still_failed))
             sudo_password = click.prompt("[sudo] password for %s" % user, hide_input=True)
-        for h in failed_hosts:
-            r = run_remote_sudo_script(
-                h, fallback_script, sudo_password, timeout=300, dry_run=dry_run, **ssh_kwargs,
+            # Re-run fallback with the password for failed hosts
+            result_map, still_failed = run_with_sudo_fallback(
+                still_failed, chown_script, fallback_script, ssh_kwargs,
+                dry_run=dry_run, sudo_password=sudo_password,
             )
-            result_map[h] = r
 
         # Retry individually on per-host sudo failures
-        still_failed = [h for h in failed_hosts if not result_map[h].success]
         if still_failed and sudo_password:
             click.echo()
             click.echo("Sudo authentication failed on %d host(s). Retrying individually..." % len(still_failed))
@@ -1570,57 +1376,24 @@ def setup_clear_cache(ctx, hosts, hosts_file, cluster_name, user, save_sudo, dry
 
       sparkrun setup clear-cache --cluster mylab --dry-run
     """
-    import os
-
     from sparkrun.config import SparkrunConfig
-    from sparkrun.orchestration.primitives import build_ssh_kwargs
-    from sparkrun.orchestration.ssh import (
-        run_remote_scripts_parallel,
-        run_remote_sudo_script,
-    )
+    from sparkrun.orchestration.sudo import run_with_sudo_fallback
+    from sparkrun.orchestration.ssh import run_remote_sudo_script
 
     config = SparkrunConfig()
-
-    # Resolve hosts
-    cluster_mgr = _get_cluster_manager()
-    host_list, cluster_mgr = _resolve_hosts_or_exit(hosts, hosts_file, cluster_name, config)
-
-    # Resolve SSH user
-    cluster_user = _resolve_cluster_user(cluster_name, hosts, hosts_file, cluster_mgr)
-    if user is None:
-        user = cluster_user or config.ssh_user or os.environ.get("USER", "root")
-
-    # Build SSH kwargs
-    ssh_kwargs = build_ssh_kwargs(config)
-    if user:
-        ssh_kwargs["ssh_user"] = user
+    host_list, user, ssh_kwargs = _resolve_setup_context(hosts, hosts_file, cluster_name, config, user)
 
     click.echo("Clearing page cache on %d host(s)..." % len(host_list))
     click.echo()
 
     sudo_password = None
 
+    from sparkrun.scripts import read_script
+
     # --save-sudo: install scoped sudoers entry on each host
     if save_sudo:
         click.echo("Installing sudoers entry for passwordless cache clearing...")
-        sudoers_script = (
-            'set -euo pipefail\n'
-            'SUDOERS_FILE="/etc/sudoers.d/sparkrun-dropcaches-{user}"\n'
-            '\n'
-            'cat > "$SUDOERS_FILE" << SUDOERS_EOF\n'
-            '# Installed by: sparkrun setup clear-cache --save-sudo\n'
-            '{user} ALL=(root) NOPASSWD: /usr/bin/tee /proc/sys/vm/drop_caches\n'
-            'SUDOERS_EOF\n'
-            '\n'
-            'if visudo -cf "$SUDOERS_FILE" >/dev/null 2>&1; then\n'
-            '    chmod 0440 "$SUDOERS_FILE"\n'
-            '    echo "OK: installed sudoers entry in $SUDOERS_FILE"\n'
-            'else\n'
-            '    rm -f "$SUDOERS_FILE"\n'
-            '    echo "ERROR: sudoers validation failed"\n'
-            '    exit 1\n'
-            'fi\n'
-        ).format(user=user)
+        sudoers_script = read_script("clear_cache_sudoers.sh").format(user=user)
 
         if dry_run:
             click.echo("  [dry-run] Would install sudoers entry on %d host(s):" % len(host_list))
@@ -1645,48 +1418,28 @@ def setup_clear_cache(ctx, hosts, hosts_file, cluster_name, user, save_sudo, dry
             click.echo()
 
     # Generate the drop_caches script with sudo -n (non-interactive).
-    drop_script = (
-        'set -euo pipefail\n'
-        'sync\n'
-        'echo 3 | sudo -n /usr/bin/tee /proc/sys/vm/drop_caches > /dev/null 2>&1\n'
-        'echo "OK: page cache cleared"\n'
-    )
+    drop_script = read_script("clear_cache.sh")
 
     # Password-based fallback script (no sudo — run_remote_sudo_script runs as root)
-    fallback_script = (
-        'set -euo pipefail\n'
-        'sync\n'
-        'echo 3 > /proc/sys/vm/drop_caches\n'
-        'echo "OK: page cache cleared"\n'
+    fallback_script = read_script("clear_cache_fallback.sh")
+
+    # Try non-interactive sudo, then password-based fallback
+    result_map, still_failed = run_with_sudo_fallback(
+        host_list, drop_script, fallback_script, ssh_kwargs,
+        dry_run=dry_run, sudo_password=sudo_password,
     )
 
-    # Step 1: Try non-interactive sudo on all hosts in parallel
-    parallel_results = run_remote_scripts_parallel(
-        host_list, drop_script, timeout=300, dry_run=dry_run, **ssh_kwargs,
-    )
-
-    # Partition results: successes vs failures needing password
-    result_map: dict[str, object] = {}
-    failed_hosts = []
-    for r in parallel_results:
-        if r.success:
-            result_map[r.host] = r
-        else:
-            failed_hosts.append(r.host)
-
-    # Step 2: For failed hosts, fall back to password-based sudo
-    if failed_hosts and not dry_run:
+    # If hosts failed without a password, prompt and retry
+    if still_failed and not dry_run:
         if sudo_password is None:
-            click.echo("Sudo password required for %d host(s)." % len(failed_hosts))
+            click.echo("Sudo password required for %d host(s)." % len(still_failed))
             sudo_password = click.prompt("[sudo] password for %s" % user, hide_input=True)
-        for h in failed_hosts:
-            r = run_remote_sudo_script(
-                h, fallback_script, sudo_password, timeout=300, dry_run=dry_run, **ssh_kwargs,
+            result_map, still_failed = run_with_sudo_fallback(
+                still_failed, drop_script, fallback_script, ssh_kwargs,
+                dry_run=dry_run, sudo_password=sudo_password,
             )
-            result_map[h] = r
 
         # Retry individually on per-host sudo failures
-        still_failed = [h for h in failed_hosts if not result_map[h].success]
         if still_failed and sudo_password:
             click.echo()
             click.echo("Sudo authentication failed on %d host(s). Retrying individually..." % len(still_failed))
@@ -1757,22 +1510,13 @@ def stop(ctx, recipe_name, hosts, hosts_file, cluster_name, tp_override, dry_run
     host_list = _apply_tp_trimming(host_list, recipe, tp_override=tp_override)
 
     from sparkrun.orchestration.primitives import build_ssh_kwargs, cleanup_containers, cleanup_containers_local
-    from sparkrun.orchestration.docker import generate_container_name
+    from sparkrun.orchestration.docker import enumerate_cluster_containers
     from sparkrun.orchestration.job_metadata import generate_cluster_id
 
     cluster_id = generate_cluster_id(recipe, host_list)
     ssh_kwargs = build_ssh_kwargs(config)
 
-    # Build list of all possible container names for this cluster_id
-    # (covers solo, Ray head/worker, and native node_N patterns)
-    container_names = [
-        generate_container_name(cluster_id, "solo"),
-        generate_container_name(cluster_id, "head"),
-        generate_container_name(cluster_id, "worker"),
-    ]
-    # Add per-rank node containers for native clustering
-    for rank in range(len(host_list)):
-        container_names.append("%s_node_%d" % (cluster_id, rank))
+    container_names = enumerate_cluster_containers(cluster_id, len(host_list))
 
     from sparkrun.hosts import is_local_host
     is_local = len(host_list) == 1 and is_local_host(host_list[0])
@@ -2041,10 +1785,8 @@ def cluster_status(ctx, hosts, hosts_file, cluster_name, dry_run, config_path=No
       sparkrun cluster status --cluster mylab
     """
     from sparkrun.config import SparkrunConfig
-    from sparkrun.cluster_manager import (
-        query_cluster_status,
-        format_job_label, format_job_commands, format_host_display,
-    )
+    from sparkrun.cluster_manager import query_cluster_status
+    from sparkrun.utils.cli_formatters import format_job_label, format_job_commands, format_host_display
     from sparkrun.orchestration.primitives import build_ssh_kwargs
 
     config = SparkrunConfig(config_path) if config_path else SparkrunConfig()
@@ -2152,7 +1894,8 @@ def recipe(ctx):
 @click.pass_context
 def recipe_list(ctx, registry, runtime, query, config_path=None):
     """List available recipes from all registries."""
-    from sparkrun.recipe import list_recipes, filter_recipes, format_recipe_table
+    from sparkrun.recipe import list_recipes, filter_recipes
+    from sparkrun.utils.cli_formatters import format_recipe_table
 
     config, registry_mgr = _get_config_and_registry(config_path)
     registry_mgr.ensure_initialized()
@@ -2174,7 +1917,8 @@ def recipe_list(ctx, registry, runtime, query, config_path=None):
 @click.pass_context
 def recipe_search(ctx, registry, runtime, query, config_path=None):
     """Search for recipes by name, model, or description."""
-    from sparkrun.recipe import filter_recipes, format_recipe_table
+    from sparkrun.recipe import filter_recipes
+    from sparkrun.utils.cli_formatters import format_recipe_table
 
     config, registry_mgr = _get_config_and_registry(config_path)
     registry_mgr.ensure_initialized()

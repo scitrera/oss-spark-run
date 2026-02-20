@@ -14,6 +14,73 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _distribute_from_head(
+    head: str,
+    hosts: list[str],
+    ensure_script: str,
+    distribute_script: str,
+    resource_label: str,
+    ssh_user: str | None = None,
+    ssh_key: str | None = None,
+    ssh_options: list[str] | None = None,
+    timeout: int | None = None,
+    dry_run: bool = False,
+) -> list[str]:
+    """Shared head-to-workers distribution pattern.
+
+    1. Run *ensure_script* on head to ensure resource is present.
+    2. If single host, return (done).
+    3. Run *distribute_script* on head to stream to remaining hosts.
+
+    Args:
+        head: Head hostname (``hosts[0]``).
+        hosts: Full cluster host list (head + workers).
+        ensure_script: Bash script that ensures the resource exists on head.
+        distribute_script: Bash script that distributes from head to workers.
+        resource_label: Human-readable label for log messages (e.g. "Model", "Image").
+        ssh_user: Optional SSH username.
+        ssh_key: Optional path to SSH private key.
+        ssh_options: Additional SSH options.
+        timeout: Per-operation timeout in seconds.
+        dry_run: If True, show what would be done without executing.
+
+    Returns:
+        List of hostnames where distribution failed (empty = full success).
+    """
+    from sparkrun.orchestration.ssh import run_remote_script
+
+    # Step 1: ensure resource on head
+    ensure_result = run_remote_script(
+        head, ensure_script,
+        ssh_user=ssh_user, ssh_key=ssh_key, ssh_options=ssh_options,
+        timeout=timeout, dry_run=dry_run,
+    )
+    if not ensure_result.success:
+        logger.error("Failed to ensure %s on head %s", resource_label, head)
+        return list(hosts)
+
+    # Step 2: if single host, we're done
+    if len(hosts) == 1:
+        logger.info("Single host — %s ready", resource_label)
+        return []
+
+    # Step 3: distribute from head to remaining hosts
+    dist_result = run_remote_script(
+        head, distribute_script,
+        ssh_user=ssh_user, ssh_key=ssh_key, ssh_options=ssh_options,
+        timeout=timeout, dry_run=dry_run,
+    )
+
+    if dist_result.success:
+        logger.info("%s distributed from head to all targets", resource_label)
+        return []
+
+    # Report failure using management hostnames
+    logger.warning("%s distribution from head failed (rc=%d)",
+                   resource_label, dist_result.returncode)
+    return list(hosts[1:])
+
+
 def distribute_resources(
         image: str,
         model: str,

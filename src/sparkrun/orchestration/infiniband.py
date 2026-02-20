@@ -11,6 +11,7 @@ import logging
 from dataclasses import dataclass, field
 
 from sparkrun.scripts import read_script
+from sparkrun.utils import parse_kv_output  # noqa: F401 — re-exported for callers
 
 logger = logging.getLogger(__name__)
 
@@ -60,28 +61,6 @@ def generate_ib_detect_script() -> str:
         Bash script content as a string.
     """
     return read_script("ib_detect.sh")
-
-
-# TODO: move to utility lib
-def parse_kv_output(output: str) -> dict[str, str]:
-    """Parse key=value lines from script output.
-
-    Lines starting with ``#`` are ignored. Leading/trailing whitespace
-    on keys and values is stripped.
-
-    Args:
-        output: Raw stdout containing key=value lines.
-
-    Returns:
-        Dictionary of parsed key=value pairs.
-    """
-    result: dict[str, str] = {}
-    for line in output.strip().splitlines():
-        line = line.strip()
-        if "=" in line and not line.startswith("#"):
-            key, _, value = line.partition("=")
-            result[key.strip()] = value.strip()
-    return result
 
 
 def parse_ib_detect_output(output: str) -> dict[str, str]:

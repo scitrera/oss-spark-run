@@ -19,7 +19,6 @@ from sparkrun.orchestration.ssh import (
     build_ssh_opts_string,
     run_pipeline_to_remotes_parallel,
     run_remote_command,
-    run_remote_script,
 )
 from sparkrun.scripts import read_script
 
@@ -241,6 +240,8 @@ def distribute_image_from_head(
     Returns:
         List of hostnames where distribution failed (empty = full success).
     """
+    from sparkrun.orchestration.distribution import _distribute_from_head
+
     if not hosts:
         return []
 
@@ -248,23 +249,10 @@ def distribute_image_from_head(
     logger.info("Distributing image '%s' from head (%s) to %d host(s)",
                 image, head, len(hosts))
 
-    # Step 1: pull image on head
-    pull_script = read_script("image_sync.sh").format(image=image)
-    pull_result = run_remote_script(
-        head, pull_script,
-        ssh_user=ssh_user, ssh_key=ssh_key, ssh_options=ssh_options,
-        timeout=timeout, dry_run=dry_run,
-    )
-    if not pull_result.success:
-        logger.error("Failed to pull image on head %s", head)
-        return list(hosts)
+    # Build ensure script (pull image on head)
+    ensure_script = read_script("image_sync.sh").format(image=image)
 
-    # Step 2: if single host, we're done
-    if len(hosts) == 1:
-        logger.info("Single host — image pull complete")
-        return []
-
-    # Step 3: distribute from head to remaining hosts
+    # Build distribute script (stream from head to workers)
     targets = worker_transfer_hosts or hosts[1:]
     ssh_opts = build_ssh_opts_string(
         ssh_user=ssh_user, ssh_key=ssh_key, ssh_options=ssh_options,
@@ -275,16 +263,12 @@ def distribute_image_from_head(
         ssh_opts=ssh_opts,
         ssh_user=ssh_user or "",
     )
-    dist_result = run_remote_script(
-        head, dist_script,
+
+    return _distribute_from_head(
+        head=head, hosts=hosts,
+        ensure_script=ensure_script,
+        distribute_script=dist_script,
+        resource_label="Image '%s'" % image,
         ssh_user=ssh_user, ssh_key=ssh_key, ssh_options=ssh_options,
         timeout=timeout, dry_run=dry_run,
     )
-
-    if dist_result.success:
-        logger.info("Image '%s' distributed from head to all targets", image)
-        return []
-
-    # Report using management hostnames
-    logger.warning("Image distribution from head failed (rc=%d)", dist_result.returncode)
-    return list(hosts[1:])

@@ -1,4 +1,4 @@
-"""Tests for sparkrun.vram module."""
+"""Tests for sparkrun.models.vram module."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from unittest import mock
 
 import pytest
 
-from sparkrun.vram import (
+from sparkrun.models.vram import (
     VRAMEstimate,
     bytes_per_element,
     estimate_vram,
@@ -296,7 +296,7 @@ class TestEstimateVram:
 
     def test_gpu_memory_utilization_budget(self):
         """gpu_memory_utilization should compute usable memory and available KV."""
-        from sparkrun.vram import DGX_SPARK_VRAM_GB
+        from sparkrun.models.vram import DGX_SPARK_VRAM_GB
 
         est = estimate_vram(
             model_vram=10.0,
@@ -356,7 +356,7 @@ class TestEstimateVram:
 
     def test_gpu_memory_utilization_with_tp(self):
         """Budget analysis should work with tensor parallel."""
-        from sparkrun.vram import DGX_SPARK_VRAM_GB
+        from sparkrun.models.vram import DGX_SPARK_VRAM_GB
 
         est = estimate_vram(
             model_vram=20.0,

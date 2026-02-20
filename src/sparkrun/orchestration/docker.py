@@ -8,10 +8,6 @@ They do not execute Docker commands directly.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from sparkrun.recipe import Recipe
 
 logger = logging.getLogger(__name__)
 
@@ -189,3 +185,28 @@ def generate_container_name(cluster_id: str, role: str = "head") -> str:
         Container name in the form ``{cluster_id}_{role}``.
     """
     return f"{cluster_id}_{role}"
+
+
+def enumerate_cluster_containers(cluster_id: str, num_hosts: int) -> list[str]:
+    """Return all possible container names for a cluster.
+
+    Covers solo, Ray (head/worker), and native (node_N) patterns so
+    callers can clean up containers regardless of the runtime that
+    created them.
+
+    Args:
+        cluster_id: Cluster identifier (e.g. ``sparkrun0``).
+        num_hosts: Number of hosts in the cluster (used to generate
+            native ``node_N`` names).
+
+    Returns:
+        List of container name strings.
+    """
+    names = [
+        generate_container_name(cluster_id, "solo"),
+        generate_container_name(cluster_id, "head"),
+        generate_container_name(cluster_id, "worker"),
+    ]
+    for rank in range(num_hosts):
+        names.append("%s_node_%d" % (cluster_id, rank))
+    return names

@@ -238,19 +238,54 @@ class RuntimePlugin(Plugin):
     ) -> None:
         """Follow logs for a multi-node cluster.
 
-        Override in subclasses to provide runtime-specific cluster log tailing.
-        The default raises NotImplementedError.
+        Uses :meth:`_cluster_log_mode` and :meth:`_head_container_name`
+        to determine the log tailing strategy and target container.
+        Subclasses control behaviour by overriding those hooks rather
+        than this method.
         """
-        raise NotImplementedError(
-            "%s does not implement cluster log following" % type(self).__name__
-        )
+        from sparkrun.orchestration.primitives import build_ssh_kwargs
+
+        ssh_kwargs = build_ssh_kwargs(config)
+        container_name = self._head_container_name(cluster_id)
+
+        if self._cluster_log_mode() == "file":
+            from sparkrun.orchestration.ssh import stream_container_file_logs
+            stream_container_file_logs(
+                hosts[0], container_name, tail=tail, dry_run=dry_run, **ssh_kwargs,
+            )
+        else:
+            from sparkrun.orchestration.ssh import stream_remote_logs
+            stream_remote_logs(
+                hosts[0], container_name, tail=tail, dry_run=dry_run, **ssh_kwargs,
+            )
+
+    def _head_container_name(self, cluster_id: str) -> str:
+        """Return the head container name for log following.
+
+        Override in subclasses that use non-standard naming.
+        The default returns ``{cluster_id}_head``.
+        """
+        from sparkrun.orchestration.docker import generate_container_name
+        return generate_container_name(cluster_id, "head")
+
+    def _cluster_log_mode(self) -> str:
+        """Return the log tailing mode for cluster containers.
+
+        ``"file"`` uses :func:`stream_container_file_logs` (tails a log
+        file inside the container).  ``"docker"`` uses
+        :func:`stream_remote_logs` (``docker logs``).
+
+        Default is ``"docker"``.  Override to ``"file"`` for runtimes
+        that use the sleep-infinity + exec pattern in cluster mode.
+        """
+        return "docker"
 
     # --- Launch / Stop interface ---
     #
-    # Runtimes control their own orchestration by overriding run() and stop().
-    # The default implementations handle solo (single-node) mode.  Runtimes
-    # that support multi-node clustering override these to compose their
-    # specific flow from orchestration primitives.
+    # The base class handles the solo-vs-cluster dispatch.  Runtimes that
+    # support multi-node clustering override ``_run_cluster`` and
+    # ``_stop_cluster`` to compose their specific flow from orchestration
+    # primitives.
 
     def run(
             self,
@@ -271,13 +306,7 @@ class RuntimePlugin(Plugin):
             ib_ip_map: dict[str, str] | None = None,
             **kwargs,
     ) -> int:
-        """Launch the workload — solo or cluster.
-
-        The default implementation handles solo (single-node) mode:
-        IB detection, container launch, serve command execution.
-
-        Runtimes that support multi-node clustering should override this
-        method and compose their flow from orchestration primitives.
+        """Launch a workload -- delegates to solo or cluster implementation.
 
         Args:
             hosts: List of hostnames/IPs (first = head).
@@ -296,19 +325,36 @@ class RuntimePlugin(Plugin):
                 provided (not ``None``), skips runtime IB detection and
                 uses this env directly.
             ib_ip_map: Pre-detected InfiniBand IP mapping
-                (management host → IB IP).  Used by runtimes that need
+                (management host -> IB IP).  Used by runtimes that need
                 IB addresses for inter-node communication (e.g. llama.cpp
                 RPC).  When ``None``, the runtime may detect IB IPs
                 itself if ``skip_ib_detect`` is ``False``.
-            **kwargs: Runtime-specific keyword arguments.
+            **kwargs: Runtime-specific keyword arguments (e.g. ray_port,
+                dashboard_port, init_port, rpc_port).
 
         Returns:
             Exit code (0 = success).
         """
-        return self._run_solo(
-            host=hosts[0] if hosts else "localhost",
+        if len(hosts) <= 1:
+            return self._run_solo(
+                host=hosts[0] if hosts else "localhost",
+                image=image,
+                serve_command=serve_command,
+                cluster_id=cluster_id,
+                env=env,
+                cache_dir=cache_dir,
+                config=config,
+                dry_run=dry_run,
+                detached=detached,
+                skip_ib_detect=skip_ib_detect,
+                nccl_env=nccl_env,
+            )
+        return self._run_cluster(
+            hosts=hosts,
             image=image,
             serve_command=serve_command,
+            recipe=recipe,
+            overrides=overrides,
             cluster_id=cluster_id,
             env=env,
             cache_dir=cache_dir,
@@ -317,6 +363,26 @@ class RuntimePlugin(Plugin):
             detached=detached,
             skip_ib_detect=skip_ib_detect,
             nccl_env=nccl_env,
+            ib_ip_map=ib_ip_map,
+            **kwargs,
+        )
+
+    def _run_cluster(
+            self,
+            hosts: list[str],
+            image: str,
+            serve_command: str,
+            recipe: Recipe,
+            overrides: dict[str, Any],
+            **kwargs,
+    ) -> int:
+        """Launch a multi-node cluster workload.
+
+        Override in subclasses to implement cluster launch.
+        The default raises :class:`NotImplementedError`.
+        """
+        raise NotImplementedError(
+            "Cluster mode not supported by %s" % self.runtime_name
         )
 
     def stop(
@@ -326,10 +392,7 @@ class RuntimePlugin(Plugin):
             config: SparkrunConfig | None = None,
             dry_run: bool = False,
     ) -> int:
-        """Stop a running workload.
-
-        The default implementation handles solo (single-node) teardown.
-        Runtimes that support multi-node should override.
+        """Stop a running workload -- delegates to solo or cluster implementation.
 
         Args:
             hosts: List of hostnames/IPs in the workload.
@@ -340,11 +403,34 @@ class RuntimePlugin(Plugin):
         Returns:
             Exit code (0 = success).
         """
-        return self._stop_solo(
-            host=hosts[0] if hosts else "localhost",
+        if len(hosts) <= 1:
+            return self._stop_solo(
+                host=hosts[0] if hosts else "localhost",
+                cluster_id=cluster_id,
+                config=config,
+                dry_run=dry_run,
+            )
+        return self._stop_cluster(
+            hosts=hosts,
             cluster_id=cluster_id,
             config=config,
             dry_run=dry_run,
+        )
+
+    def _stop_cluster(
+            self,
+            hosts: list[str],
+            cluster_id: str,
+            config: SparkrunConfig | None,
+            dry_run: bool,
+    ) -> int:
+        """Stop a multi-node cluster workload.
+
+        Override in subclasses to implement cluster teardown.
+        The default raises :class:`NotImplementedError`.
+        """
+        raise NotImplementedError(
+            "Cluster stop not supported by %s" % self.runtime_name
         )
 
     # --- Default solo implementation (used by base and simple runtimes) ---
@@ -541,6 +627,49 @@ class RuntimePlugin(Plugin):
             "    exit 1\n"
             "fi\n"
         ) % {"name": container_name, "cleanup": cleanup, "run_cmd": run_cmd, "label": label}
+
+    # --- Banner / connection info ---
+
+    def _print_cluster_banner(self, title, hosts, image, cluster_id, ports, dry_run):
+        """Print standardized cluster launch banner.
+
+        Args:
+            title: Banner title (e.g. "Ray Cluster Launcher").
+            hosts: All hosts in the cluster.
+            image: Container image reference.
+            cluster_id: Cluster identifier.
+            ports: Mapping of label to value for port lines.
+            dry_run: Whether this is a dry-run invocation.
+        """
+        mode = "DRY-RUN" if dry_run else "LIVE"
+        logger.info("=" * 60)
+        logger.info("sparkrun %s", title)
+        logger.info("=" * 60)
+        logger.info("Cluster ID:     %s", cluster_id)
+        logger.info("Image:          %s", image)
+        logger.info("Head Node:      %s", hosts[0])
+        logger.info(
+            "Worker Nodes:   %s",
+            ", ".join(hosts[1:]) if len(hosts) > 1 else "<none>",
+        )
+        for label, value in ports.items():
+            logger.info("%-16s%s", label + ":", value)
+        logger.info("Mode:           %s", mode)
+        logger.info("=" * 60)
+
+    def _print_connection_info(self, hosts, cluster_id):
+        """Print standardized post-launch connection info.
+
+        Args:
+            hosts: All hosts in the cluster.
+            cluster_id: Cluster identifier.
+        """
+        logger.info("=" * 60)
+        logger.info("Cluster launched successfully. Nodes: %d", len(hosts))
+        logger.info("")
+        logger.info("To view logs:    sparkrun logs <recipe> --hosts %s", ",".join(hosts))
+        logger.info("To stop cluster: sparkrun stop <recipe> --hosts %s", ",".join(hosts))
+        logger.info("=" * 60)
 
     def __repr__(self) -> str:
         return "%s(runtime_name=%r)" % (self.__class__.__name__, self.runtime_name)

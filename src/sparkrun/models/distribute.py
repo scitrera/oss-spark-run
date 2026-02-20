@@ -10,11 +10,10 @@ from __future__ import annotations
 import logging
 
 from sparkrun.config import resolve_cache_dir
-from sparkrun.models.download import download_model
+from sparkrun.models.download import download_model, model_cache_path
 from sparkrun.orchestration.primitives import map_transfer_failures
 from sparkrun.orchestration.ssh import (
     build_ssh_opts_string,
-    run_remote_script,
     run_remote_scripts_parallel,
     run_rsync_parallel,
 )
@@ -26,14 +25,10 @@ logger = logging.getLogger(__name__)
 def _model_cache_path(model_id: str, cache_dir: str) -> str:
     """Compute the HF cache path for a model.
 
-    Mirrors the logic in :func:`sparkrun.models.download.is_model_cached`.
-    For GGUF model specs (``repo:quant``), strips the quant variant
-    since the cache directory is keyed by repository name only.
+    Thin wrapper around :func:`sparkrun.models.download.model_cache_path`
+    kept for backward compatibility.
     """
-    from sparkrun.models.download import parse_gguf_model_spec
-    repo_id, _ = parse_gguf_model_spec(model_id)
-    safe_name = repo_id.replace("/", "--")
-    return f"{cache_dir}/hub/models--{safe_name}"
+    return model_cache_path(model_id, cache_dir)
 
 
 def _try_fix_remote_permissions(
@@ -193,6 +188,8 @@ def distribute_model_from_head(
     Returns:
         List of hostnames where distribution failed (empty = full success).
     """
+    from sparkrun.orchestration.distribution import _distribute_from_head
+
     if not hosts:
         return []
 
@@ -201,34 +198,21 @@ def distribute_model_from_head(
     logger.info("Distributing model '%s' from head (%s) to %d host(s)",
                 model_id, head, len(hosts))
 
-    # Step 1: download model on head
+    # Build ensure script (download model on head)
     from sparkrun.models.download import is_gguf_model, parse_gguf_model_spec
     revision_flag = "--revision %s " % revision if revision else ""
     if is_gguf_model(model_id):
         repo_id, quant = parse_gguf_model_spec(model_id)
-        dl_script = read_script("model_sync_gguf.sh").format(
+        ensure_script = read_script("model_sync_gguf.sh").format(
             repo_id=repo_id, quant=quant or "", cache=cache,
             revision_flag=revision_flag,
         )
     else:
-        dl_script = read_script("model_sync.sh").format(
+        ensure_script = read_script("model_sync.sh").format(
             model_id=model_id, cache=cache, revision_flag=revision_flag,
         )
-    dl_result = run_remote_script(
-        head, dl_script,
-        ssh_user=ssh_user, ssh_key=ssh_key, ssh_options=ssh_options,
-        timeout=timeout, dry_run=dry_run,
-    )
-    if not dl_result.success:
-        logger.error("Failed to download model on head %s", head)
-        return list(hosts)
 
-    # Step 2: if single host, we're done
-    if len(hosts) == 1:
-        logger.info("Single host — model download complete")
-        return []
-
-    # Step 3: distribute from head to remaining hosts
+    # Build distribute script (rsync from head to workers)
     targets = worker_transfer_hosts or hosts[1:]
     model_path = _model_cache_path(model_id, cache)
     ssh_opts = build_ssh_opts_string(
@@ -240,16 +224,12 @@ def distribute_model_from_head(
         ssh_opts=ssh_opts,
         ssh_user=ssh_user or "",
     )
-    dist_result = run_remote_script(
-        head, dist_script,
+
+    return _distribute_from_head(
+        head=head, hosts=hosts,
+        ensure_script=ensure_script,
+        distribute_script=dist_script,
+        resource_label="Model '%s'" % model_id,
         ssh_user=ssh_user, ssh_key=ssh_key, ssh_options=ssh_options,
         timeout=timeout, dry_run=dry_run,
     )
-
-    if dist_result.success:
-        logger.info("Model '%s' distributed from head to all targets", model_id)
-        return []
-
-    # Report using management hostnames
-    logger.warning("Model distribution from head failed (rc=%d)", dist_result.returncode)
-    return list(hosts[1:])

@@ -493,6 +493,7 @@ hosts however you like — they become workers.
 | `sparkrun setup ssh`               | Set up passwordless SSH mesh across hosts         |
 | `sparkrun setup cx7`               | Detect and configure ConnectX-7 NICs across hosts |
 | `sparkrun setup fix-permissions`   | Fix root-owned HF cache files on cluster hosts    |
+| `sparkrun setup clear-cache`       | Drop Linux page cache on cluster hosts             |
 
 ## Roadmap
 

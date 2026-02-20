@@ -498,7 +498,7 @@ class TestDistributeImageTransferHosts:
 class TestDistributeImageFromHead:
     """Test distribute_image_from_head."""
 
-    @mock.patch("sparkrun.containers.distribute.run_remote_script")
+    @mock.patch("sparkrun.orchestration.ssh.run_remote_script")
     def test_single_host(self, mock_run):
         """Single host: pull only, no distribution."""
         mock_run.return_value = RemoteResult(
@@ -509,7 +509,7 @@ class TestDistributeImageFromHead:
         assert failed == []
         assert mock_run.call_count == 1
 
-    @mock.patch("sparkrun.containers.distribute.run_remote_script")
+    @mock.patch("sparkrun.orchestration.ssh.run_remote_script")
     def test_multi_host(self, mock_run):
         """Multi host: pull on head, then distribute script."""
         mock_run.return_value = RemoteResult(
@@ -525,7 +525,7 @@ class TestDistributeImageFromHead:
         assert "w1" in dist_script
         assert "w2" in dist_script
 
-    @mock.patch("sparkrun.containers.distribute.run_remote_script")
+    @mock.patch("sparkrun.orchestration.ssh.run_remote_script")
     def test_pull_fails(self, mock_run):
         """If pull on head fails, all hosts are returned as failed."""
         mock_run.return_value = RemoteResult(
@@ -535,7 +535,7 @@ class TestDistributeImageFromHead:
         failed = distribute_image_from_head("img:latest", ["head", "w1"])
         assert failed == ["head", "w1"]
 
-    @mock.patch("sparkrun.containers.distribute.run_remote_script")
+    @mock.patch("sparkrun.orchestration.ssh.run_remote_script")
     def test_distribute_fails(self, mock_run):
         """If distribution script fails, target hosts are returned as failed."""
         mock_run.side_effect = [
@@ -551,7 +551,7 @@ class TestDistributeImageFromHead:
         failed = distribute_image_from_head("img:latest", [])
         assert failed == []
 
-    @mock.patch("sparkrun.containers.distribute.run_remote_script")
+    @mock.patch("sparkrun.orchestration.ssh.run_remote_script")
     def test_ssh_params_forwarded(self, mock_run):
         """SSH parameters are forwarded to remote script calls."""
         mock_run.return_value = RemoteResult(
@@ -566,7 +566,7 @@ class TestDistributeImageFromHead:
         assert call_kwargs["ssh_user"] == "admin"
         assert call_kwargs["ssh_key"] == "/mykey"
 
-    @mock.patch("sparkrun.containers.distribute.run_remote_script")
+    @mock.patch("sparkrun.orchestration.ssh.run_remote_script")
     def test_worker_transfer_hosts(self, mock_run):
         """worker_transfer_hosts are used for distribution targets."""
         mock_run.return_value = RemoteResult(
@@ -702,7 +702,7 @@ class TestDistributeModelFromLocal:
 class TestDistributeModelFromHead:
     """Test distribute_model_from_head."""
 
-    @mock.patch("sparkrun.models.distribute.run_remote_script")
+    @mock.patch("sparkrun.orchestration.ssh.run_remote_script")
     def test_single_host(self, mock_run):
         """Single host: download only, no distribution."""
         mock_run.return_value = RemoteResult(
@@ -713,7 +713,7 @@ class TestDistributeModelFromHead:
         assert failed == []
         assert mock_run.call_count == 1
 
-    @mock.patch("sparkrun.models.distribute.run_remote_script")
+    @mock.patch("sparkrun.orchestration.ssh.run_remote_script")
     def test_multi_host(self, mock_run):
         """Multi host: download on head, then distribute script."""
         mock_run.return_value = RemoteResult(
@@ -729,7 +729,7 @@ class TestDistributeModelFromHead:
         assert "w2" in dist_script
         assert "models--org--model" in dist_script
 
-    @mock.patch("sparkrun.models.distribute.run_remote_script")
+    @mock.patch("sparkrun.orchestration.ssh.run_remote_script")
     def test_download_fails(self, mock_run):
         """If download on head fails, all hosts are returned as failed."""
         mock_run.return_value = RemoteResult(
@@ -739,7 +739,7 @@ class TestDistributeModelFromHead:
         failed = distribute_model_from_head("org/model", ["head", "w1"])
         assert failed == ["head", "w1"]
 
-    @mock.patch("sparkrun.models.distribute.run_remote_script")
+    @mock.patch("sparkrun.orchestration.ssh.run_remote_script")
     def test_distribute_fails(self, mock_run):
         """If distribution script fails, target hosts are returned as failed."""
         mock_run.side_effect = [
@@ -755,7 +755,7 @@ class TestDistributeModelFromHead:
         failed = distribute_model_from_head("org/model", [])
         assert failed == []
 
-    @mock.patch("sparkrun.models.distribute.run_remote_script")
+    @mock.patch("sparkrun.orchestration.ssh.run_remote_script")
     def test_worker_transfer_hosts(self, mock_run):
         """worker_transfer_hosts are used for distribution targets."""
         mock_run.return_value = RemoteResult(

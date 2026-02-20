@@ -157,6 +157,29 @@ def resolve_gguf_container_path(
 
 
 # ---------------------------------------------------------------------------
+# Cache path computation
+# ---------------------------------------------------------------------------
+
+def model_cache_path(model_id: str, cache_dir: str | None = None) -> str:
+    """Compute the HF cache path for a model.
+
+    For GGUF model specs (``repo:quant``), strips the quant variant
+    since the cache directory is keyed by repository name only.
+
+    Args:
+        model_id: HuggingFace model identifier or GGUF spec.
+        cache_dir: Override for the HuggingFace cache directory.
+
+    Returns:
+        Absolute path to the model's cache directory.
+    """
+    cache = resolve_cache_dir(cache_dir)
+    repo_id, _ = parse_gguf_model_spec(model_id)
+    safe_name = repo_id.replace("/", "--")
+    return f"{cache}/hub/models--{safe_name}"
+
+
+# ---------------------------------------------------------------------------
 # Cache checking
 # ---------------------------------------------------------------------------
 
@@ -258,6 +281,57 @@ def is_model_cached(
 # Download
 # ---------------------------------------------------------------------------
 
+def _snapshot_download(
+    repo_id: str,
+    cache: str,
+    label: str,
+    token: str | None = None,
+    revision: str | None = None,
+    allow_patterns: list[str] | None = None,
+) -> int:
+    """Shared helper that calls ``huggingface_hub.snapshot_download``.
+
+    Centralises the common import, progress-bar enablement, kwarg
+    assembly, and error handling used by both :func:`download_model`
+    and :func:`_download_gguf`.
+
+    Args:
+        repo_id: HuggingFace repository identifier.
+        cache: Resolved base HuggingFace cache directory.
+        label: Human-readable label for log messages (e.g. the
+            original ``model_id`` string).
+        token: Optional HuggingFace API token.
+        revision: Optional revision (branch, tag, or commit hash).
+        allow_patterns: Optional file-pattern allowlist forwarded to
+            ``snapshot_download`` (used by GGUF downloads).
+
+    Returns:
+        Exit code (0 = success, 1 = failure).
+    """
+    try:
+        from huggingface_hub import snapshot_download
+        from huggingface_hub.utils import enable_progress_bars
+
+        enable_progress_bars()
+
+        kwargs: dict = {
+            "repo_id": repo_id,
+            "cache_dir": _hub_cache(cache),
+            "token": token,
+        }
+        if revision:
+            kwargs["revision"] = revision
+        if allow_patterns:
+            kwargs["allow_patterns"] = allow_patterns
+
+        snapshot_download(**kwargs)
+        logger.info("Model downloaded successfully: %s", label)
+        return 0
+    except Exception as e:
+        logger.error("Failed to download model %s: %s", label, e)
+        return 1
+
+
 def download_model(
     model_id: str,
     cache_dir: str | None = None,
@@ -300,26 +374,10 @@ def download_model(
     else:
         logger.info("Downloading model: %s (revision=%s)...", model_id, revision or "latest")
 
-    try:
-        from huggingface_hub import snapshot_download
-        from huggingface_hub.utils import enable_progress_bars
-
-        enable_progress_bars()
-
-        kwargs: dict = {
-            "repo_id": model_id,
-            "cache_dir": _hub_cache(cache),
-            "token": token,
-        }
-        if revision:
-            kwargs["revision"] = revision
-
-        snapshot_download(**kwargs)
-        logger.info("Model downloaded successfully: %s", model_id)
-        return 0
-    except Exception as e:
-        logger.error("Failed to download model %s: %s", model_id, e)
-        return 1
+    return _snapshot_download(
+        repo_id=model_id, cache=cache, label=model_id,
+        token=token, revision=revision,
+    )
 
 
 def _download_gguf(
@@ -359,26 +417,8 @@ def _download_gguf(
         logger.info("Downloading GGUF model: %s (quant=%s, revision=%s)...",
                      repo_id, quant or "any", revision or "latest")
 
-    try:
-        from huggingface_hub import snapshot_download
-        from huggingface_hub.utils import enable_progress_bars
-
-        enable_progress_bars()
-
-        kwargs: dict = {
-            "repo_id": repo_id,
-            "cache_dir": _hub_cache(cache),
-            "token": token,
-        }
-        if revision:
-            kwargs["revision"] = revision
-        if quant:
-            # Download only files matching the quant variant
-            kwargs["allow_patterns"] = ["*%s*" % quant]
-
-        snapshot_download(**kwargs)
-        logger.info("GGUF model downloaded successfully: %s", model_id)
-        return 0
-    except Exception as e:
-        logger.error("Failed to download GGUF model %s: %s", model_id, e)
-        return 1
+    patterns = ["*%s*" % quant] if quant else None
+    return _snapshot_download(
+        repo_id=repo_id, cache=cache, label=model_id,
+        token=token, revision=revision, allow_patterns=patterns,
+    )

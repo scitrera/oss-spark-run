@@ -136,11 +136,11 @@ class ClusterManager:
         return self._read_cluster(cluster_path)
 
     def update(
-        self,
-        name: str,
-        hosts: list[str] | None = None,
-        description: str | None = None,
-        user: str | None = _UNSET,
+            self,
+            name: str,
+            hosts: list[str] | None = None,
+            description: str | None = None,
+            user: str | None = _UNSET,
     ) -> None:
         """Update existing cluster definition.
 
@@ -278,10 +278,10 @@ class ClusterManager:
 
     def _read_cluster(self, cluster_path: Path) -> ClusterDefinition:
         """Read cluster definition from YAML file."""
-        with cluster_path.open("r") as f:
-            data = yaml.safe_load(f)
+        from sparkrun.utils import load_yaml
 
-        if not isinstance(data, dict):
+        data = load_yaml(cluster_path)
+        if not data:
             raise ClusterError(f"Invalid cluster file format: {cluster_path}")
 
         return ClusterDefinition(
@@ -297,9 +297,9 @@ class ClusterManager:
 # ---------------------------------------------------------------------------
 
 def query_cluster_status(
-    host_list: list[str],
-    ssh_kwargs: dict[str, Any],
-    cache_dir: str,
+        host_list: list[str],
+        ssh_kwargs: dict[str, Any],
+        cache_dir: str,
 ) -> ClusterStatusResult:
     """Query sparkrun containers on hosts and classify them.
 
@@ -410,43 +410,3 @@ def query_cluster_status(
         total_containers=total_containers,
         host_count=len(host_list),
     )
-
-
-def format_job_label(meta: dict[str, Any], cluster_id: str) -> str:
-    """Format a display label from job metadata."""
-    label = meta.get("recipe", cluster_id)
-    tp = meta.get("tensor_parallel")
-    if tp:
-        label += f"  (tp={tp})"
-    return label
-
-
-def format_job_commands(meta: dict[str, Any]) -> tuple[str | None, str | None]:
-    """Return (logs_cmd, stop_cmd) strings from cached metadata."""
-    recipe_name = meta.get("recipe")
-    if not recipe_name:
-        return None, None
-    job_hosts = meta.get("hosts", [])
-    tp = meta.get("tensor_parallel")
-    host_flag = f" --hosts {','.join(job_hosts)}" if job_hosts else ""
-    tp_flag = f" --tp {tp}" if tp else ""
-    logs_cmd = f"sparkrun logs {recipe_name}{host_flag}{tp_flag}"
-    stop_cmd = f"sparkrun stop {recipe_name}{host_flag}{tp_flag}"
-    return logs_cmd, stop_cmd
-
-
-def format_host_display(host: str, meta: dict[str, Any] | None) -> str:
-    """Format host with complementary IP from job metadata if available.
-
-    If the queried host matches a mgmt or IB IP in the metadata,
-    show the other IP in parentheses so both are visible.
-    """
-    mgmt_map = meta.get("mgmt_ip_map", {}) if meta else {}
-    ib_map = meta.get("ib_ip_map", {}) if meta else {}
-    mgmt = mgmt_map.get(host)
-    if mgmt and mgmt != host:
-        return f"{host} (mgmt: {mgmt})"
-    ib = ib_map.get(host)
-    if ib and ib != host:
-        return f"{host} (ib: {ib})"
-    return host
