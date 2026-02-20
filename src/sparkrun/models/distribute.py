@@ -15,6 +15,7 @@ from sparkrun.orchestration.primitives import map_transfer_failures
 from sparkrun.orchestration.ssh import (
     build_ssh_opts_string,
     run_remote_script,
+    run_remote_scripts_parallel,
     run_rsync_parallel,
 )
 from sparkrun.scripts import read_script
@@ -33,6 +34,48 @@ def _model_cache_path(model_id: str, cache_dir: str) -> str:
     repo_id, _ = parse_gguf_model_spec(model_id)
     safe_name = repo_id.replace("/", "--")
     return f"{cache_dir}/hub/models--{safe_name}"
+
+
+def _try_fix_remote_permissions(
+    cache_dir: str,
+    hosts: list[str],
+    ssh_user: str | None = None,
+    ssh_key: str | None = None,
+    ssh_options: list[str] | None = None,
+    dry_run: bool = False,
+) -> None:
+    """Best-effort chown of the HF cache on remote hosts before rsync.
+
+    Docker containers create root-owned files in the cache directory.
+    This tries non-interactive ``sudo -n chown`` on each host so the
+    SSH user can rsync into the directory.  Failures are non-fatal —
+    a warning is logged with a hint about ``--save-sudo``.
+    """
+    script = (
+        'set -euo pipefail\n'
+        'CACHE_DIR="{cache_dir}"\n'
+        '[ -d "$CACHE_DIR" ] || exit 0\n'
+        'OWNER=$(stat -c "%U" "$CACHE_DIR" 2>/dev/null || echo "")\n'
+        'ME=$(id -un)\n'
+        '[ "$OWNER" = "$ME" ] && exit 0\n'
+        'sudo -n /usr/bin/chown -R "$ME" "$CACHE_DIR" 2>/dev/null\n'
+    ).format(cache_dir=cache_dir)
+
+    results = run_remote_scripts_parallel(
+        hosts, script,
+        ssh_user=ssh_user, ssh_key=ssh_key, ssh_options=ssh_options,
+        timeout=30, dry_run=dry_run,
+    )
+
+    failed = [r.host for r in results if not r.success]
+    if failed:
+        logger.warning(
+            "Could not fix cache ownership on %d host(s) — rsync may fail "
+            "if Docker left root-owned files.  Run "
+            "'sparkrun setup fix-permissions --save-sudo' to enable "
+            "passwordless chown for future runs.",
+            len(failed),
+        )
 
 
 def distribute_model_from_local(
@@ -90,7 +133,14 @@ def distribute_model_from_local(
 
     xfer = transfer_hosts or hosts
 
-    # Step 2: rsync model cache to all hosts in parallel
+    # Step 2: best-effort fix of remote cache ownership before rsync
+    _try_fix_remote_permissions(
+        cache, hosts,
+        ssh_user=ssh_user, ssh_key=ssh_key, ssh_options=ssh_options,
+        dry_run=dry_run,
+    )
+
+    # Step 3: rsync model cache to all hosts in parallel
     model_path = _model_cache_path(model_id, cache)
     results = run_rsync_parallel(
         model_path, xfer, model_path,

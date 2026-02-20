@@ -1286,17 +1286,23 @@ def setup_cx7(ctx, hosts, hosts_file, cluster_name, user, dry_run, force, mtu, s
 @host_options
 @click.option("--user", "-u", default=None, help="Target owner (default: SSH user)")
 @click.option("--cache-dir", default=None, help="Cache directory (default: ~/.cache/huggingface)")
+@click.option("--save-sudo", is_flag=True, default=False,
+              help="Install sudoers entry for passwordless chown (requires sudo once)")
 @dry_run_option
 @click.pass_context
-def setup_fix_permissions(ctx, hosts, hosts_file, cluster_name, user, cache_dir, dry_run):
+def setup_fix_permissions(ctx, hosts, hosts_file, cluster_name, user, cache_dir, save_sudo, dry_run):
     """Fix file ownership in HuggingFace cache on cluster hosts.
 
     Docker containers create files as root in ~/.cache/huggingface/,
     leaving the normal user unable to manage or clean the cache.
     This command runs chown on all target hosts to restore ownership.
 
-    Detects passwordless sudo automatically. Hosts without NOPASSWD
-    will prompt for a sudo password once.
+    Tries non-interactive sudo first on all hosts in parallel, then
+    falls back to password-based sudo for any that fail.
+
+    Use --save-sudo to install a scoped sudoers entry so future runs
+    never need a password. The entry only permits chown on the cache
+    directory — no broader privileges are granted.
 
     Examples:
 
@@ -1306,6 +1312,8 @@ def setup_fix_permissions(ctx, hosts, hosts_file, cluster_name, user, cache_dir,
 
       sparkrun setup fix-permissions --cluster mylab --cache-dir /data/hf-cache
 
+      sparkrun setup fix-permissions --cluster mylab --save-sudo
+
       sparkrun setup fix-permissions --cluster mylab --dry-run
     """
     import os
@@ -1313,8 +1321,7 @@ def setup_fix_permissions(ctx, hosts, hosts_file, cluster_name, user, cache_dir,
     from sparkrun.config import SparkrunConfig
     from sparkrun.orchestration.primitives import build_ssh_kwargs
     from sparkrun.orchestration.ssh import (
-        detect_sudo_on_hosts,
-        run_remote_script,
+        run_remote_scripts_parallel,
         run_remote_sudo_script,
     )
 
@@ -1342,21 +1349,103 @@ def setup_fix_permissions(ctx, hosts, hosts_file, cluster_name, user, cache_dir,
         click.echo("Cache directory: %s" % cache_path)
     click.echo()
 
-    # Detect passwordless sudo on all hosts
-    nopasswd_hosts = detect_sudo_on_hosts(host_list, dry_run=dry_run, **ssh_kwargs)
-
-    password_hosts = set(host_list) - nopasswd_hosts
     sudo_password = None
-    if password_hosts and not dry_run:
-        click.echo("Sudo password required for %d host(s)." % len(password_hosts))
-        sudo_password = click.prompt("[sudo] password for %s" % user, hide_input=True)
 
-    # Generate the chown script.
+    # --save-sudo: install scoped sudoers entry on each host
+    if save_sudo:
+        click.echo("Installing sudoers entry for passwordless chown...")
+        if cache_path:
+            sudoers_script = (
+                'set -euo pipefail\n'
+                'CACHE_DIR="{cache_dir}"\n'
+                'CHOWN_PATH="/usr/bin/chown"\n'
+                'SUDOERS_FILE="/etc/sudoers.d/sparkrun-chown-{user}"\n'
+                '\n'
+                'cat > "$SUDOERS_FILE" << SUDOERS_EOF\n'
+                '# Installed by: sparkrun setup fix-permissions --save-sudo\n'
+                '{user} ALL=(root) NOPASSWD: $CHOWN_PATH -R {user} $CACHE_DIR\n'
+                'SUDOERS_EOF\n'
+                '\n'
+                'if visudo -cf "$SUDOERS_FILE" >/dev/null 2>&1; then\n'
+                '    chmod 0440 "$SUDOERS_FILE"\n'
+                '    echo "OK: installed sudoers entry in $SUDOERS_FILE"\n'
+                'else\n'
+                '    rm -f "$SUDOERS_FILE"\n'
+                '    echo "ERROR: sudoers validation failed"\n'
+                '    exit 1\n'
+                'fi\n'
+            ).format(cache_dir=cache_path, user=user)
+        else:
+            sudoers_script = (
+                'set -euo pipefail\n'
+                'TARGET_HOME=$(getent passwd "{user}" | cut -d: -f6)\n'
+                'if [ -z "$TARGET_HOME" ]; then echo "ERROR: cannot resolve home for {user}"; exit 1; fi\n'
+                'CACHE_DIR="$TARGET_HOME/.cache/huggingface"\n'
+                'CHOWN_PATH="/usr/bin/chown"\n'
+                'SUDOERS_FILE="/etc/sudoers.d/sparkrun-chown-{user}"\n'
+                '\n'
+                'cat > "$SUDOERS_FILE" << SUDOERS_EOF\n'
+                '# Installed by: sparkrun setup fix-permissions --save-sudo\n'
+                '{user} ALL=(root) NOPASSWD: $CHOWN_PATH -R {user} $CACHE_DIR\n'
+                'SUDOERS_EOF\n'
+                '\n'
+                'if visudo -cf "$SUDOERS_FILE" >/dev/null 2>&1; then\n'
+                '    chmod 0440 "$SUDOERS_FILE"\n'
+                '    echo "OK: installed sudoers entry in $SUDOERS_FILE"\n'
+                'else\n'
+                '    rm -f "$SUDOERS_FILE"\n'
+                '    echo "ERROR: sudoers validation failed"\n'
+                '    exit 1\n'
+                'fi\n'
+            ).format(user=user)
+
+        if dry_run:
+            click.echo("  [dry-run] Would install sudoers entry on %d host(s):" % len(host_list))
+            for h in host_list:
+                click.echo("    %s: /etc/sudoers.d/sparkrun-chown-%s" % (h, user))
+            click.echo()
+        else:
+            sudo_password = click.prompt("[sudo] password for %s" % user, hide_input=True)
+            sudoers_ok = 0
+            sudoers_fail = 0
+            for h in host_list:
+                r = run_remote_sudo_script(
+                    h, sudoers_script, sudo_password, timeout=300, dry_run=False, **ssh_kwargs,
+                )
+                if r.success:
+                    sudoers_ok += 1
+                    click.echo("  [OK]   %s: %s" % (h, r.stdout.strip()))
+                else:
+                    sudoers_fail += 1
+                    click.echo("  [FAIL] %s: %s" % (h, r.stderr.strip()[:200]), err=True)
+            click.echo("Sudoers install: %d OK, %d failed." % (sudoers_ok, sudoers_fail))
+            click.echo()
+
+    # Generate the chown script with sudo -n (non-interactive).
     # Uses getent passwd to resolve the target user's home directory,
     # avoiding tilde/HOME ambiguity when running under sudo.
     if cache_path:
-        # Absolute path override — use directly
-        script_body = (
+        chown_script = (
+            'set -euo pipefail\n'
+            'CACHE_DIR="{cache_dir}"\n'
+            '[ -d "$CACHE_DIR" ] || {{ echo "SKIP: $CACHE_DIR does not exist"; exit 0; }}\n'
+            'sudo -n /usr/bin/chown -R {user} "$CACHE_DIR" 2>/dev/null\n'
+            'echo "OK: fixed permissions on $CACHE_DIR for {user}"\n'
+        ).format(cache_dir=cache_path, user=user)
+    else:
+        chown_script = (
+            'set -euo pipefail\n'
+            'TARGET_HOME=$(getent passwd "{user}" | cut -d: -f6)\n'
+            'if [ -z "$TARGET_HOME" ]; then echo "ERROR: cannot resolve home for {user}"; exit 1; fi\n'
+            'CACHE_DIR="$TARGET_HOME/.cache/huggingface"\n'
+            '[ -d "$CACHE_DIR" ] || {{ echo "SKIP: $CACHE_DIR does not exist"; exit 0; }}\n'
+            'sudo -n /usr/bin/chown -R {user} "$CACHE_DIR" 2>/dev/null\n'
+            'echo "OK: fixed permissions on $CACHE_DIR for {user}"\n'
+        ).format(user=user)
+
+    # Password-based fallback script (no sudo prefix — run_remote_sudo_script runs as root)
+    if cache_path:
+        fallback_script = (
             'set -euo pipefail\n'
             'CACHE_DIR="{cache_dir}"\n'
             '[ -d "$CACHE_DIR" ] || {{ echo "SKIP: $CACHE_DIR does not exist"; exit 0; }}\n'
@@ -1364,8 +1453,7 @@ def setup_fix_permissions(ctx, hosts, hosts_file, cluster_name, user, cache_dir,
             'echo "OK: fixed permissions on $CACHE_DIR for {user}"\n'
         ).format(cache_dir=cache_path, user=user)
     else:
-        # Default: resolve home via getent
-        script_body = (
+        fallback_script = (
             'set -euo pipefail\n'
             'TARGET_HOME=$(getent passwd "{user}" | cut -d: -f6)\n'
             'if [ -z "$TARGET_HOME" ]; then echo "ERROR: cannot resolve home for {user}"; exit 1; fi\n'
@@ -1375,38 +1463,40 @@ def setup_fix_permissions(ctx, hosts, hosts_file, cluster_name, user, cache_dir,
             'echo "OK: fixed permissions on $CACHE_DIR for {user}"\n'
         ).format(user=user)
 
-    # For NOPASSWD hosts: prefix chown with sudo in the script itself
-    sudo_script_body = script_body.replace("chown -R", "sudo chown -R")
+    # Step 1: Try non-interactive sudo on all hosts in parallel
+    parallel_results = run_remote_scripts_parallel(
+        host_list, chown_script, timeout=300, dry_run=dry_run, **ssh_kwargs,
+    )
 
-    results: dict[str, object] = {}
+    # Partition results: successes vs failures needing password
+    result_map: dict[str, object] = {}
+    failed_hosts = []
+    for r in parallel_results:
+        if r.success:
+            result_map[r.host] = r
+        else:
+            failed_hosts.append(r.host)
 
-    # Execute on NOPASSWD hosts (script uses sudo prefix)
-    nopasswd_list = [h for h in host_list if h in nopasswd_hosts]
-    for h in nopasswd_list:
-        r = run_remote_script(h, sudo_script_body, timeout=300, dry_run=dry_run, **ssh_kwargs)
-        results[h] = r
+    # Step 2: For failed hosts, fall back to password-based sudo
+    if failed_hosts and not dry_run:
+        if sudo_password is None:
+            click.echo("Sudo password required for %d host(s)." % len(failed_hosts))
+            sudo_password = click.prompt("[sudo] password for %s" % user, hide_input=True)
+        for h in failed_hosts:
+            r = run_remote_sudo_script(
+                h, fallback_script, sudo_password, timeout=300, dry_run=dry_run, **ssh_kwargs,
+            )
+            result_map[h] = r
 
-    # Execute on password hosts (run_remote_sudo_script runs as root, no sudo prefix needed)
-    password_list = [h for h in host_list if h in password_hosts]
-    for h in password_list:
-        r = run_remote_sudo_script(
-            h, script_body, sudo_password, timeout=300, dry_run=dry_run, **ssh_kwargs,
-        )
-        results[h] = r
-
-    # Build result map for retry
-    result_map = {h: r for h, r in results.items()}
-
-    # Retry individually on sudo failures (same pattern as cx7)
-    if password_hosts and sudo_password and not dry_run:
-        failed_sudo = [h for h in password_list if not result_map[h].success]
-        if failed_sudo:
+        # Retry individually on per-host sudo failures
+        still_failed = [h for h in failed_hosts if not result_map[h].success]
+        if still_failed and sudo_password:
             click.echo()
-            click.echo("Sudo authentication failed on %d host(s). Retrying individually..." % len(failed_sudo))
-            for fhost in failed_sudo:
+            click.echo("Sudo authentication failed on %d host(s). Retrying individually..." % len(still_failed))
+            for fhost in still_failed:
                 per_host_pw = click.prompt("[sudo] password for %s @ %s" % (user, fhost), hide_input=True)
                 retry_result = run_remote_sudo_script(
-                    fhost, script_body, per_host_pw, timeout=300, dry_run=dry_run, **ssh_kwargs,
+                    fhost, fallback_script, per_host_pw, timeout=300, dry_run=dry_run, **ssh_kwargs,
                 )
                 result_map[fhost] = retry_result
 

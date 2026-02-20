@@ -202,11 +202,15 @@ class TestModelCachePathGguf:
 class TestDownloadModelGguf:
 
     @mock.patch("sparkrun.models.download.resolve_gguf_path", return_value="/cached/q4.gguf")
-    def test_gguf_already_cached_skips_download(self, mock_resolve):
-        """GGUF model already cached returns 0 without downloading."""
-        rc = download_model("Qwen/Qwen3-1.7B-GGUF:Q4_K_M", cache_dir="/fake")
-        assert rc == 0
-        mock_resolve.assert_called_once()
+    def test_gguf_already_cached_still_verifies(self, mock_resolve):
+        """GGUF model already cached still calls snapshot_download to verify completeness."""
+        mock_hf = mock.MagicMock()
+        with mock.patch.dict("sys.modules", {"huggingface_hub": mock_hf, "huggingface_hub.utils": mock_hf.utils}):
+            rc = download_model("Qwen/Qwen3-1.7B-GGUF:Q4_K_M", cache_dir="/fake")
+            assert rc == 0
+            mock_resolve.assert_called_once()
+            # snapshot_download should have been called even though cache existed
+            mock_hf.snapshot_download.assert_called_once()
 
     @mock.patch("sparkrun.models.download.resolve_gguf_path", return_value=None)
     @mock.patch("sparkrun.models.download.snapshot_download", create=True)

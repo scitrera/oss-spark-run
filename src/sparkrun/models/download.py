@@ -294,11 +294,11 @@ def download_model(
                      model_id, revision or "latest", cache)
         return 0
 
-    if is_model_cached(model_id, cache, revision=revision):
-        logger.info("Model %s already cached at %s", model_id, cache)
-        return 0
-
-    logger.info("Downloading model: %s (revision=%s)...", model_id, revision or "latest")
+    cached = is_model_cached(model_id, cache, revision=revision)
+    if cached:
+        logger.info("Model %s appears cached — verifying completeness...", model_id)
+    else:
+        logger.info("Downloading model: %s (revision=%s)...", model_id, revision or "latest")
 
     try:
         from huggingface_hub import snapshot_download
@@ -352,13 +352,12 @@ def _download_gguf(
                      repo_id, quant, revision or "latest", cache)
         return 0
 
-    # Check if matching GGUF file already cached
-    if resolve_gguf_path(model_id, cache) is not None:
-        logger.info("GGUF model %s already cached", model_id)
-        return 0
-
-    logger.info("Downloading GGUF model: %s (quant=%s, revision=%s)...",
-                 repo_id, quant or "any", revision or "latest")
+    cached = resolve_gguf_path(model_id, cache) is not None
+    if cached:
+        logger.info("GGUF model %s appears cached — verifying completeness...", model_id)
+    else:
+        logger.info("Downloading GGUF model: %s (quant=%s, revision=%s)...",
+                     repo_id, quant or "any", revision or "latest")
 
     try:
         from huggingface_hub import snapshot_download
