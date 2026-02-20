@@ -17,6 +17,7 @@ defaults:
   max_model_len: 262144
   served_model_name: qwen3.5-397b
   attention_backend: triton
+  fp8_gemm_backend: "cutlass"  # TODO: decide on cutlass or flashinfer_trtllm; NOTE: auto/deep_gemm won't work right now
   tool_call_parser: qwen3_coder
   reasoning_parser: qwen3
   speculative_algo: NEXTN
@@ -34,6 +35,7 @@ command: |
       --host {host} \
       --port {port} \
       --attention-backend {attention_backend} \
+      --fp8-gemm-backend {fp8_gemm_backend} \
       --tool-call-parser {tool_call_parser} \
       --reasoning-parser {reasoning_parser} \
       --speculative-algo {speculative_algo} \
